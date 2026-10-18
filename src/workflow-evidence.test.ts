@@ -1,7 +1,13 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
 import {
   runWorkflow,
   WorkflowOperationError,
@@ -10,7 +16,14 @@ import {
 
 const directories: string[] = [];
 afterEach(() =>
-  directories.splice(0).forEach((path) => rmSync(path, { recursive: true })),
+  directories.splice(0).forEach((directory) => {
+    const path = realpathSync(directory);
+    expect(
+      path.startsWith(realpathSync(tmpdir()) + sep) &&
+        basename(path).startsWith("workflow-evidence-"),
+    ).toBe(true);
+    rmSync(path, { recursive: true });
+  }),
 );
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "workflow-evidence-"));
