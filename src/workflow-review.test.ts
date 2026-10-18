@@ -282,6 +282,39 @@ it("never grants a new correction after its three transport attempts are exhaust
   expect(f.effects).toEqual(["implement", "validate", "review"]);
 });
 
+it("keeps review transport and correction transport budgets independent", async () => {
+  const f = fixture();
+  let reviews = 0;
+  let corrections = 0;
+  f.operations.review = async () => {
+    if (++reviews < 3)
+      throw new WorkflowOperationError("transport", "Review disconnected");
+    return "Malformed independent review";
+  };
+  const result = await runWorkflow({
+    ...f,
+    recovery: { wait: async () => {} },
+    reviewOutput: {
+      correct: async () => {
+        if (++corrections < 3)
+          throw new WorkflowOperationError(
+            "transport",
+            "Correction disconnected",
+          );
+        return approved;
+      },
+    },
+  });
+  expect(result.phase).toBe("ready");
+  expect(result.recovery?.operations["review/1"]?.attempts).toBe(3);
+  expect(
+    Object.entries(result.recovery!.operations).find(([key]) =>
+      key.startsWith("review-correction:"),
+    )?.[1].attempts,
+  ).toBe(3);
+  expect(f.effects).toEqual(["implement", "validate", "deliver"]);
+});
+
 it("refuses to omit the saved strict-review policy on resume", async () => {
   const f = fixture();
   await expect(
