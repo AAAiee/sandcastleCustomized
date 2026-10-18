@@ -48,7 +48,59 @@ export type WorkflowErrorCode =
   | "operation"
   | "persistence"
   | "uncertain"
-  | "cancelled";
+  | "cancelled"
+  | "exhausted"
+  | "permanent"
+  | "format";
+
+/** A consumer classifies meaning at its transport/provider boundary. Unknown errors stop. */
+export class WorkflowOperationError extends Error {
+  constructor(
+    readonly kind: "transport" | "substantive" | "permanent" | "format",
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "WorkflowOperationError";
+  }
+}
+export interface WorkflowAttempt {
+  readonly operation: string;
+  readonly implementation: number;
+  readonly transport: number;
+}
+export interface WorkflowRecoveryState {
+  implementationAttempts: number;
+  operations: Record<
+    string,
+    {
+      attempts: number;
+      status: "running" | "interrupted" | "completed" | "stopped";
+      nextAttemptAt?: number;
+      result?: unknown;
+      failure?: { kind: string; message: string };
+    }
+  >;
+}
+export type WorkflowReconciliation =
+  | { status: "completed"; value: unknown }
+  | { status: "not-started" }
+  | { status: "uncertain" };
+export interface WorkflowRecovery<Config> {
+  /** Observe the effect before permitting an interrupted implementation/delivery to replay. */
+  reconcile?(
+    context: WorkflowContext<Config> & {
+      phase: "implement" | "deliver";
+      attempt: WorkflowAttempt;
+      candidate?: string;
+      validation?: WorkflowValidation;
+      review?: WorkflowReview;
+    },
+  ): Promise<WorkflowReconciliation>;
+  /** Time boundaries, injectable for deterministic consumers/tests. Backoff remains persisted. */
+  now?(): number;
+  wait?(milliseconds: number, signal?: AbortSignal): Promise<void>;
+}
 
 export interface WorkflowCheckpoint {
   version: 1;
@@ -60,6 +112,8 @@ export interface WorkflowCheckpoint {
   review?: WorkflowReview;
   delivery?: WorkflowDelivery;
   inFlight?: "implement" | "deliver";
+  recovery?: WorkflowRecoveryState;
+  repair?: { phase: WorkflowPhase; message: string };
   failure?: { code: WorkflowErrorCode; message: string };
 }
 
@@ -67,6 +121,8 @@ export interface WorkflowContext<Config> {
   readonly project: WorkflowProject<Config>;
   readonly task: WorkflowTask;
   readonly signal?: AbortSignal;
+  readonly attempt?: WorkflowAttempt;
+  readonly repair?: WorkflowCheckpoint["repair"];
 }
 export interface WorkflowCandidateContext<
   Config,
@@ -119,6 +175,8 @@ export interface WorkflowOptions<Config> {
   readonly operations: WorkflowOperations<Config>;
   readonly checkpoint?: WorkflowCheckpoint;
   readonly signal?: AbortSignal;
+  /** Explicitly enable fixed durable recovery budgets. Existing callers retain fail-fast behavior. */
+  readonly recovery?: WorkflowRecovery<Config>;
 }
 
 export async function runWorkflow<Config>(
@@ -128,6 +186,7 @@ export async function runWorkflow<Config>(
   const state: WorkflowCheckpoint = structuredClone(
     options.checkpoint ?? { version: 1, project: project.id, phase: "select" },
   );
+  const recover = options.recovery ?? (state.recovery ? {} : undefined);
   const fail = (
     code: WorkflowErrorCode,
     message: string,
@@ -188,7 +247,42 @@ export async function runWorkflow<Config>(
       "invalid-checkpoint",
       "Checkpoint identity or task state is invalid; it was not replayed.",
     );
-  if (state.inFlight)
+  if (
+    recover &&
+    options.checkpoint &&
+    !state.recovery &&
+    !["select", "idle"].includes(state.phase)
+  )
+    fail(
+      "invalid-checkpoint",
+      "Legacy mid-task checkpoints have unknown consumed budgets; recovery cannot invent fresh attempts.",
+    );
+  if (
+    state.recovery &&
+    (!Number.isInteger(state.recovery.implementationAttempts) ||
+      state.recovery.implementationAttempts < 0 ||
+      state.recovery.implementationAttempts > 3 ||
+      !state.recovery.operations ||
+      typeof state.recovery.operations !== "object" ||
+      Array.isArray(state.recovery.operations) ||
+      !Object.values(state.recovery.operations).every(
+        (record) =>
+          record &&
+          Number.isInteger(record.attempts) &&
+          record.attempts >= 1 &&
+          record.attempts <= 3 &&
+          ["running", "interrupted", "completed", "stopped"].includes(
+            record.status,
+          ) &&
+          (record.nextAttemptAt === undefined ||
+            Number.isFinite(record.nextAttemptAt)),
+      ))
+  )
+    fail(
+      "invalid-checkpoint",
+      "Saved recovery budgets are invalid; no operation was replayed.",
+    );
+  if (state.inFlight && !recover)
     fail(
       "uncertain",
       `The earlier ${state.inFlight} may have performed a side effect. Reconcile it before resuming.`,
@@ -215,14 +309,166 @@ export async function runWorkflow<Config>(
     project,
     task: structuredClone(state.task!),
     signal,
+    repair: state.repair,
   });
   const candidateContext = (): WorkflowCandidateContext<Config> => ({
     ...context(),
     candidate: state.candidate!,
   });
+  if (recover) state.recovery ??= { implementationAttempts: 0, operations: {} };
+  const now = recover?.now ?? Date.now;
+  const wait =
+    recover?.wait ??
+    ((milliseconds: number, signal?: AbortSignal) =>
+      new Promise<void>((resolve, reject) => {
+        signal?.throwIfAborted();
+        const aborted = () => {
+          clearTimeout(timer);
+          reject(signal?.reason);
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", aborted);
+          resolve();
+        }, milliseconds);
+        signal?.addEventListener("abort", aborted, { once: true });
+      }));
+  let activeAttempt: WorkflowAttempt | undefined;
+  const perform = async <T>(
+    name: string,
+    action: () => Promise<T>,
+    effect?: "implement" | "deliver",
+    reusable: (value: T) => boolean = () => true,
+  ): Promise<T> => {
+    if (!recover) return action();
+    const recovery = state.recovery!;
+    const key = `${name}/${recovery.implementationAttempts}`;
+    const record = (recovery.operations[key] ??= {
+      attempts: 0,
+      status: "interrupted",
+    });
+    if (record.status === "completed") {
+      if (reusable(record.result as T)) return record.result as T;
+      record.status = "interrupted";
+    }
+    if (
+      record.status === "stopped" &&
+      !(effect && record.failure?.kind === "unknown")
+    )
+      fail(
+        record.failure?.kind === "format"
+          ? "format"
+          : record.failure?.kind === "permanent"
+            ? "permanent"
+            : "operation",
+        record.failure?.message ?? "Operation stopped.",
+      );
+    for (;;) {
+      signal?.throwIfAborted();
+      activeAttempt = {
+        operation: key,
+        implementation: recovery.implementationAttempts,
+        transport: record.attempts,
+      };
+      if (effect && record.attempts > 0) {
+        if (!recover.reconcile)
+          fail(
+            "uncertain",
+            `Reconciliation is required before replaying ${key}.`,
+          );
+        const interruptedAttempt = activeAttempt;
+        const result = await perform(
+          `reconcile:${key}:${record.attempts}`,
+          () =>
+            recover.reconcile!({
+              ...context(),
+              phase: effect,
+              attempt: interruptedAttempt,
+              candidate: state.candidate,
+              validation: structuredClone(state.validation),
+              review: structuredClone(state.review),
+            }),
+          undefined,
+          (value) => value.status === "completed",
+        );
+        if (result.status === "completed") {
+          record.status = "completed";
+          record.result = structuredClone(result.value);
+          delete record.nextAttemptAt;
+          await persist();
+          return result.value as T;
+        }
+        if (result.status !== "not-started")
+          fail(
+            "uncertain",
+            `The outcome of ${key} remains uncertain; no effect was replayed.`,
+          );
+        if (record.failure?.kind === "unknown")
+          fail(
+            "uncertain",
+            `The cause of ${key} is unknown; observable completion can be accepted, but automatic replay is disabled.`,
+          );
+      }
+      if (record.attempts >= 3)
+        fail("exhausted", `Transport attempt limit reached for ${key}.`);
+      if (record.nextAttemptAt !== undefined) {
+        await wait(Math.max(0, record.nextAttemptAt - now()), signal);
+        delete record.nextAttemptAt;
+      }
+      record.attempts++;
+      record.status = "running";
+      record.nextAttemptAt = now() + 500 * 2 ** (record.attempts - 1);
+      activeAttempt = {
+        operation: key,
+        implementation: recovery.implementationAttempts,
+        transport: record.attempts,
+      };
+      await persist();
+      signal?.throwIfAborted();
+      try {
+        const value = await action();
+        record.result = structuredClone(value);
+        record.status = "completed";
+        delete record.nextAttemptAt;
+        await persist();
+        return value;
+      } catch (cause) {
+        if (cause instanceof WorkflowError && cause.code === "persistence")
+          throw cause;
+        record.failure = {
+          kind:
+            cause instanceof WorkflowOperationError ? cause.kind : "unknown",
+          message: cause instanceof Error ? cause.message : String(cause),
+        };
+        record.status =
+          cause instanceof WorkflowOperationError && cause.kind === "transport"
+            ? "interrupted"
+            : "stopped";
+        if (record.status === "interrupted")
+          record.nextAttemptAt = now() + 500 * 2 ** (record.attempts - 1);
+        await persist();
+        if (
+          !(cause instanceof WorkflowOperationError) ||
+          cause.kind !== "transport"
+        )
+          throw cause;
+      }
+    }
+  };
   const checkCandidate = async () => {
     signal?.throwIfAborted();
-    const current = await operations.currentCandidate(context());
+    let observation = 0;
+    while (
+      recover &&
+      state.recovery!.operations[
+        `candidate:${state.phase}:${observation}/${state.recovery!.implementationAttempts}`
+      ]?.status === "completed"
+    )
+      observation++;
+    const current = await perform(
+      `candidate:${state.phase}:${observation}`,
+      () =>
+        operations.currentCandidate({ ...context(), attempt: activeAttempt }),
+    );
     signal?.throwIfAborted();
     if (current !== state.candidate)
       fail(
@@ -233,6 +479,19 @@ export async function runWorkflow<Config>(
   const checkValidation = (
     value: WorkflowValidation | undefined,
   ): WorkflowValidation => {
+    if (
+      recover &&
+      value &&
+      value.candidate === state.candidate &&
+      value.passed === false &&
+      Array.isArray(value.evidence) &&
+      value.evidence.length &&
+      value.evidence.every(text)
+    )
+      throw new WorkflowOperationError(
+        "substantive",
+        `Validation failed: ${value.evidence.join("; ")}`,
+      );
     if (
       !value ||
       value.candidate !== state.candidate ||
@@ -249,6 +508,35 @@ export async function runWorkflow<Config>(
   };
   const checkReview = (value: WorkflowReview | undefined): WorkflowReview => {
     const entries = value?.criteria;
+    if (
+      recover &&
+      value &&
+      value.candidate === state.candidate &&
+      typeof value.approved === "boolean" &&
+      Array.isArray(entries) &&
+      entries.length === state.task!.criteria.length &&
+      entries.every(
+        (entry) =>
+          entry &&
+          text(entry.id) &&
+          typeof entry.satisfied === "boolean" &&
+          text(entry.evidence),
+      ) &&
+      new Set(entries.map((entry) => entry.id)).size === entries.length &&
+      state.task!.criteria.every((criterion) =>
+        entries.some((entry) => entry.id === criterion.id),
+      ) &&
+      (!value.approved || entries.some((entry) => !entry.satisfied))
+    )
+      throw new WorkflowOperationError(
+        "substantive",
+        `Review rejected: ${
+          entries
+            .filter((entry) => !entry.satisfied)
+            .map((entry) => entry.evidence)
+            .join("; ") || "Independent approval denied"
+        }`,
+      );
     if (
       !value ||
       value.candidate !== state.candidate ||
@@ -289,82 +577,135 @@ export async function runWorkflow<Config>(
     if (!options.checkpoint) await persist();
     for (;;) {
       signal?.throwIfAborted();
-      switch (state.phase) {
-        case "select": {
-          const selected = await operations.selectTask(project, signal);
-          if (selected === null) {
-            await advance("idle");
+      try {
+        switch (state.phase) {
+          case "select": {
+            const selected = await perform("select", () =>
+              operations.selectTask(project, signal),
+            );
+            if (selected === null) {
+              await advance("idle");
+              break;
+            }
+            if (!validTask(selected))
+              fail(
+                "gate",
+                "The selected task needs unique, checkable acceptance criteria.",
+              );
+            state.task = structuredClone(selected);
+            await advance("implement");
             break;
           }
-          if (!validTask(selected))
-            fail(
-              "gate",
-              "The selected task needs unique, checkable acceptance criteria.",
+          case "implement": {
+            if (recover && state.recovery!.implementationAttempts === 0)
+              state.recovery!.implementationAttempts = 1;
+            state.inFlight = "implement";
+            await persist();
+            signal?.throwIfAborted();
+            const candidate = await perform(
+              "implement",
+              () =>
+                operations.implement({ ...context(), attempt: activeAttempt }),
+              "implement",
             );
-          state.task = structuredClone(selected);
-          await advance("implement");
-          break;
+            if (!text(candidate))
+              fail("gate", "Implementation did not identify its candidate.");
+            state.candidate = candidate;
+            await advance("validate");
+            break;
+          }
+          case "validate": {
+            await checkCandidate();
+            state.validation = structuredClone(
+              checkValidation(
+                await perform("validate", () =>
+                  operations.validate({
+                    ...candidateContext(),
+                    attempt: activeAttempt,
+                  }),
+                ),
+              ),
+            );
+            await advance("review");
+            break;
+          }
+          case "review": {
+            await checkCandidate();
+            const validation = checkValidation(state.validation);
+            state.review = structuredClone(
+              checkReview(
+                await perform("review", () =>
+                  operations.review({
+                    ...candidateContext(),
+                    validation: structuredClone(validation),
+                    attempt: activeAttempt,
+                  }),
+                ),
+              ),
+            );
+            await advance("deliver");
+            break;
+          }
+          case "deliver": {
+            await checkCandidate();
+            const validation = checkValidation(state.validation);
+            const review = checkReview(state.review);
+            state.inFlight = "deliver";
+            await persist();
+            signal?.throwIfAborted();
+            state.delivery = structuredClone(
+              checkDelivery(
+                await perform(
+                  "deliver",
+                  () =>
+                    operations.deliver({
+                      ...candidateContext(),
+                      validation: structuredClone(validation),
+                      review: structuredClone(review),
+                      attempt: activeAttempt,
+                    }),
+                  "deliver",
+                ),
+              ),
+            );
+            await advance("ready");
+            break;
+          }
+          case "ready":
+            await checkCandidate();
+            checkValidation(state.validation);
+            checkReview(state.review);
+            checkDelivery(state.delivery);
+            return structuredClone(state);
+          case "idle":
+            return structuredClone(state);
         }
-        case "implement": {
-          state.inFlight = "implement";
-          await persist();
-          signal?.throwIfAborted();
-          const candidate = await operations.implement(context());
-          if (!text(candidate))
-            fail("gate", "Implementation did not identify its candidate.");
-          state.candidate = candidate;
-          await advance("validate");
-          break;
-        }
-        case "validate": {
-          await checkCandidate();
-          state.validation = structuredClone(
-            checkValidation(await operations.validate(candidateContext())),
+      } catch (cause) {
+        if (
+          !recover ||
+          !(cause instanceof WorkflowOperationError) ||
+          cause.kind !== "substantive"
+        )
+          throw cause;
+        if (!validTask(state.task))
+          fail(
+            "gate",
+            "Implementation repair requires a valid selected task.",
+            cause,
           );
-          await advance("review");
-          break;
-        }
-        case "review": {
-          await checkCandidate();
-          const validation = checkValidation(state.validation);
-          state.review = structuredClone(
-            checkReview(
-              await operations.review({
-                ...candidateContext(),
-                validation: structuredClone(validation),
-              }),
-            ),
+        state.repair = { phase: state.phase, message: cause.message };
+        if (state.recovery!.implementationAttempts >= 3)
+          fail(
+            "exhausted",
+            "Three total implementation attempts were consumed; repair stopped.",
+            cause,
           );
-          await advance("deliver");
-          break;
-        }
-        case "deliver": {
-          await checkCandidate();
-          const validation = checkValidation(state.validation);
-          const review = checkReview(state.review);
-          state.inFlight = "deliver";
-          await persist();
-          signal?.throwIfAborted();
-          state.delivery = structuredClone(
-            checkDelivery(
-              await operations.deliver({
-                ...candidateContext(),
-                validation: structuredClone(validation),
-                review: structuredClone(review),
-              }),
-            ),
-          );
-          await advance("ready");
-          break;
-        }
-        case "ready":
-          await checkCandidate();
-          checkValidation(state.validation);
-          checkReview(state.review);
-          checkDelivery(state.delivery);
-          return structuredClone(state);
-        case "idle":
-          return structuredClone(state);
+        state.recovery!.implementationAttempts++;
+        delete state.candidate;
+        delete state.validation;
+        delete state.review;
+        delete state.delivery;
+        await advance("implement");
       }
     }
   } catch (cause) {
@@ -374,7 +715,12 @@ export async function runWorkflow<Config>(
       cause instanceof WorkflowError
         ? cause
         : new WorkflowError(
-            signal?.aborted ? "cancelled" : "operation",
+            signal?.aborted
+              ? "cancelled"
+              : cause instanceof WorkflowOperationError &&
+                  (cause.kind === "permanent" || cause.kind === "format")
+                ? cause.kind
+                : "operation",
             cause instanceof Error ? cause.message : String(cause),
             state,
             cause,

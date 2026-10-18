@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import type { Command } from "./workflow-integrations.js";
 
 export class WorkflowRuntimeError extends Error {
@@ -115,7 +116,30 @@ export async function withWorkflowRuntime<T>(
       "Runtime storage must not redirect through a symbolic link.",
     );
   const lock = join(root, "writer.lock");
+  const scope = {
+    version: 1,
+    repository,
+    projectId: options.projectId,
+    runId: options.runId,
+    compatibility: options.compatibility,
+  };
+  const identity = JSON.stringify(scope);
+  const key = digest(JSON.stringify([options.projectId, options.runId])).slice(
+    0,
+    32,
+  );
+  const directory = join(root, key);
   const owner = randomUUID();
+  const lockRecord = {
+    owner,
+    pid: process.pid,
+    host: hostname(),
+    projectId: options.projectId,
+    runId: options.runId,
+    compatibility: options.compatibility,
+    created: new Date().toISOString(),
+    status: "active",
+  };
   let fd: number;
   try {
     fd = openSync(lock, "wx", 0o600);
@@ -129,16 +153,7 @@ export async function withWorkflowRuntime<T>(
     throw cause;
   }
   try {
-    writeFileSync(
-      fd,
-      JSON.stringify({
-        owner,
-        pid: process.pid,
-        projectId: options.projectId,
-        runId: options.runId,
-        created: new Date().toISOString(),
-      }),
-    );
+    writeFileSync(fd, JSON.stringify(lockRecord));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -162,19 +177,6 @@ export async function withWorkflowRuntime<T>(
       );
     assertOwner();
   };
-  const scope = {
-    version: 1,
-    repository,
-    projectId: options.projectId,
-    runId: options.runId,
-    compatibility: options.compatibility,
-  };
-  const identity = JSON.stringify(scope);
-  const key = digest(JSON.stringify([options.projectId, options.runId])).slice(
-    0,
-    32,
-  );
-  const directory = join(root, key);
   const resources = new Map<
     string,
     {
@@ -331,12 +333,179 @@ export async function withWorkflowRuntime<T>(
       cleanup.push(cause);
     }
   }
-  if (cleanup.length)
+  if (cleanup.length) {
+    try {
+      assertOwner();
+      atomicJson(lock, { ...lockRecord, status: "cleanup-required" });
+    } catch (cause) {
+      cleanup.push(cause);
+    }
     throw new WorkflowRuntimeError(
       "cleanup",
       "Runtime cleanup needs inspection; resources or lock may remain.",
       new AggregateError(failed ? [failure, ...cleanup] : cleanup),
     );
+  }
   if (failed) throw failure;
   return output as T;
+}
+
+export interface WorkflowRuntimeReconciliation {
+  readonly owner: string;
+  readonly directory: string;
+  readonly resources: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal;
+}
+
+/** Explicit recovery, never automatic stale-PID lock theft. Resources and records are retained. */
+export async function reconcileWorkflowRuntimeLock(
+  options: WorkflowRuntimeOptions & {
+    readonly expectedOwner: string;
+    reconcile(
+      context: WorkflowRuntimeReconciliation,
+    ): Promise<
+      | { status: "released"; evidence: readonly string[] }
+      | { status: "uncertain" }
+    >;
+  },
+): Promise<void> {
+  options.signal?.throwIfAborted();
+  const result = await options.command(
+    "git",
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    { cwd: options.repository, signal: options.signal },
+  );
+  if (result.exitCode !== 0)
+    throw new WorkflowRuntimeError(
+      "configuration",
+      "Runtime repository must be a Git checkout.",
+    );
+  const root = join(
+    realpathSync(result.stdout.trim()),
+    "sandcastle",
+    "runtime-v1",
+  );
+  if (realpathSync(root) !== root)
+    throw new WorkflowRuntimeError(
+      "identity",
+      "Runtime root redirects outside its scope.",
+    );
+  const lock = join(root, "writer.lock");
+  const guard = join(root, "reconciliation.lock");
+  let fd: number;
+  try {
+    fd = openSync(guard, "wx", 0o600);
+  } catch (cause) {
+    throw new WorkflowRuntimeError(
+      "locked",
+      "Another runtime reconciliation is already active or unresolved.",
+      cause,
+    );
+  }
+  closeSync(fd);
+  try {
+    const before = readFileSync(lock, "utf8");
+    const saved = JSON.parse(before);
+    if (!options.expectedOwner || saved.owner !== options.expectedOwner)
+      throw new WorkflowRuntimeError(
+        "locked",
+        "Runtime owner changed; its lock was preserved.",
+      );
+    if (
+      saved.projectId !== options.projectId ||
+      saved.runId !== options.runId ||
+      saved.compatibility !== options.compatibility
+    )
+      throw new WorkflowRuntimeError(
+        "identity",
+        "Runtime recovery must match the original project, run and compatibility.",
+      );
+    if (
+      saved.host !== hostname() ||
+      !Number.isSafeInteger(saved.pid) ||
+      saved.pid < 1
+    )
+      throw new WorkflowRuntimeError(
+        "locked",
+        "Unknown runtime host/process ownership needs inspection; its lock was preserved.",
+      );
+    if (saved.status !== "cleanup-required") {
+      let alive = true;
+      try {
+        process.kill(saved.pid, 0);
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+        else
+          throw new WorkflowRuntimeError(
+            "locked",
+            "Runtime owner liveness could not be established.",
+            cause,
+          );
+      }
+      if (alive)
+        throw new WorkflowRuntimeError(
+          "locked",
+          "Runtime owner is still active; no resource reconciliation was started.",
+        );
+    }
+    const key = digest(
+      JSON.stringify([options.projectId, options.runId]),
+    ).slice(0, 32);
+    const directory = join(root, key);
+    if (existsSync(directory) && realpathSync(directory) !== directory)
+      throw new WorkflowRuntimeError(
+        "identity",
+        "Runtime directory redirects outside its scope.",
+      );
+    const resourceFile = join(directory, "resource-identities.json");
+    const resources: Record<string, string> = existsSync(resourceFile)
+      ? JSON.parse(readFileSync(resourceFile, "utf8"))
+      : {};
+    if (
+      !resources ||
+      typeof resources !== "object" ||
+      Array.isArray(resources) ||
+      !Object.values(resources).every((value) => typeof value === "string")
+    )
+      throw new WorkflowRuntimeError(
+        "identity",
+        "Resource identities are invalid; its lock was preserved.",
+      );
+    const observed = await options.reconcile({
+      owner: saved.owner,
+      directory,
+      resources: structuredClone(resources),
+      signal: options.signal,
+    });
+    options.signal?.throwIfAborted();
+    if (
+      observed.status !== "released" ||
+      !Array.isArray(observed.evidence) ||
+      !observed.evidence.length ||
+      !observed.evidence.every(
+        (value) => typeof value === "string" && value.trim(),
+      )
+    )
+      throw new WorkflowRuntimeError(
+        "cleanup",
+        "Owned resources remain uncertain; its runtime lock was preserved.",
+      );
+    if (readFileSync(lock, "utf8") !== before)
+      throw new WorkflowRuntimeError(
+        "locked",
+        "Runtime ownership changed during reconciliation; its lock was preserved.",
+      );
+    const audit = join(root, "reconciliations");
+    mkdirSync(audit, { recursive: true });
+    atomicJson(join(audit, digest(saved.owner) + ".json"), {
+      owner: saved.owner,
+      projectId: saved.projectId,
+      runId: saved.runId,
+      evidence: observed.evidence,
+      reconciled: new Date().toISOString(),
+    });
+    unlinkSync(lock);
+  } finally {
+    unlinkSync(guard);
+  }
 }
