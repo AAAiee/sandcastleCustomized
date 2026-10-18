@@ -122,6 +122,12 @@ const result = await runWorkflow({
 });
 ```
 
+Portable Git worktree preservation, read-only GitHub collections and optional
+host configuration are available separately through
+`@ai-hero/sandcastle/workflow/integrations`. Repository identity and task-selection
+policy stay with the consumer. See [the integration contract](docs/workflow-integrations.md)
+for preservation, bounded reads and explicit publication capabilities.
+
 See [the workflow contract](docs/workflow.md) for operation requirements,
 candidate/review gates, checkpoint behavior and the limits of this first slice.
 
