@@ -11,8 +11,10 @@ immutable Linux Docker image using already prepared Linux dependencies. It:
 
 1. Verifies the prepared dependency lockfile matches the selected revision,
    normalizing only CRLF/LF checkout line endings for that comparison.
-2. Exports canonical tracked source with `git archive`, excluding untracked edits,
-   credentials and runtime state. Git source bytes do not depend on checkout CRLF.
+2. Exports tracked source with `git -c core.autocrlf=false -c core.eol=lf archive`,
+   excluding untracked edits, credentials and runtime state. Explicit archive
+   settings prevent a workstation's automatic checkout conversion from changing
+   source bytes. Repository attributes still apply deliberately.
 3. Builds and packs in a fixed container directory with read-only dependencies,
    no network, no image pulling and no host credentials. Original postbuild and
    public type checks run. The container is removed after the attempt.

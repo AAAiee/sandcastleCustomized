@@ -82,7 +82,17 @@ assert.deepEqual(
   "Use a fresh output directory; earlier evidence is never overwritten",
 );
 const archive = join(output, "source.tar");
-git("archive", "--format=tar", "--output", archive, revision);
+git(
+  "-c",
+  "core.autocrlf=false",
+  "-c",
+  "core.eol=lf",
+  "archive",
+  "--format=tar",
+  "--output",
+  archive,
+  revision,
+);
 const name = "sandcastle-package-" + randomUUID();
 const fd = openSync(join(output, "build.log"), "wx");
 const script = [
