@@ -131,6 +131,15 @@ for preservation, bounded reads and explicit publication capabilities.
 See [the workflow contract](docs/workflow.md) for operation requirements,
 candidate/review gates, checkpoint behavior and the limits of this first slice.
 
+Wrap effects in `withWorkflowRuntime` from `@ai-hero/sandcastle/workflow/runtime`
+for repository writer locking, project/run-scoped records and compatible resource
+lifecycle. [Runtime isolation](docs/workflow-runtime.md) describes identity checks,
+resource reuse and outcomes that require explicit inspection.
+
+[Pinned builds and deliberate updates](docs/reproducible-build.md) describes
+offline reproduction from an exact source revision and installing the resulting
+archive without mutable npm links.
+
 Sandcastle exports a programmatic `run()` function for use in scripts, CI pipelines, or custom tooling. The examples below use `docker()`, but any `SandboxProvider` works in its place.
 
 ```typescript

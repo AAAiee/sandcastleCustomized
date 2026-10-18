@@ -7,6 +7,7 @@ const pkg = JSON.parse(readFileSync("./package.json", "utf8")) as {
 
 export default defineConfig({
   entry: {
+    "workflow-runtime": "src/workflow-runtime.ts",
     "workflow-integrations": "src/workflow-integrations.ts",
     workflow: "src/workflow.ts",
     index: "src/index.ts",
