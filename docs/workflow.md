@@ -81,8 +81,9 @@ throw new WorkflowOperationError("transport", "Connection interrupted", cause);
 
 `transport` retries the affected operation. `substantive` requests implementation
 repair and fresh validation/review. Well-formed negative validation/review results
-also request repair. `permanent` stops, and `format` stops distinctly for a later
-bounded output-correction policy. Neither unknown failures nor error-message
+also request repair. `permanent` stops, and `format` stops distinctly. The explicit
+review-output policy below handles extraction failures before they become operation
+errors. Neither unknown failures nor error-message
 substrings are treated as transient. Unknown read failures stop persistently;
 unknown writes can be accepted only after observable completion, never blindly
 replayed. Existing root SDK provider retry behavior remains unchanged.
@@ -100,8 +101,7 @@ validation remain available after review/delivery transport interruptions.
 Operations receive `context.attempt = { operation, implementation, transport }`
 from the persisted counters. Repair receives `context.repair = { phase, message }`.
 These are also available in checkpoints/errors for telemetry. Transport attempts
-are not extra implementation attempts. Format correction has no automatic retry
-or implementation effect in this increment.
+are not extra implementation attempts.
 
 Implementation and delivery may already have performed effects after an
 interruption. Supply `recovery.reconcile(context)` to observe them. It receives
@@ -120,13 +120,83 @@ the read budget remains bounded. A known completed result can be reused. A
 receipt for the wrong candidate never authorizes completion. No remote write,
 publication text, issue closure or PR creation is installed by this API.
 
+## Strict review output and one correction
+
+The optional `reviewOutput` policy enables durable recovery and strict output
+extraction for a **new** workflow. Supply an independent correction operation:
+
+```ts
+await runWorkflow({
+  project,
+  operations, // review may return raw stdout instead of a parsed object
+  reviewOutput: {
+    correct: async ({
+      task,
+      candidate,
+      validation,
+      output,
+      problem,
+      attempt,
+    }) =>
+      independentReviewer({
+        task,
+        candidate,
+        validation,
+        output,
+        problem,
+        attempt,
+      }),
+  },
+});
+```
+
+`independentReviewer` above is a consumer-supplied operation, not an SDK helper.
+It should reformat the same independent findings, preserving rejection when code
+does not satisfy the criteria. Operations remain responsible for read-only review
+and provider/transport error classification. The existing root SDK `Output`
+helpers, `sandbox.run`, session lifecycle and per-call retries are unchanged.
+
+`extractWorkflowReview(output, { task, candidate })` is also exported from the
+workflow entrypoint. It accepts a complete strict JSON object, a final JSON fence
+after prose, or the final `<review>` tag beginning a line (optional JSON fence
+inside). The representation must end the output; no trailing text is accepted.
+The last tag or fence of the selected representation wins; mixed ambiguous
+representations are refused. Malformed final output never falls back to an earlier
+approval. JSONC, arbitrary embedded object scanning and schema coercion are not
+supported. Object inputs receive the same checks. Literal markup inside JSON
+evidence remains ordinary string content.
+
+The object must contain `task` equal to `context.task.id`, the exact `candidate`,
+a boolean `approved`, and `criteria: [{ id, satisfied, evidence }]` covering every
+task criterion exactly once, with boolean outcomes and nonempty evidence. A valid
+negative decision is substantive rejection and requests bounded code repair; it
+does not spend a format correction or become an invitation to approve the code.
+
+Extraction occurs first. If malformed, `reviewCorrection` is flushed with
+`consumed: true`, the original output and deterministic feedback **before** the
+correction invocation. There is at most one logical correction per task,
+candidate, implementation attempt and evidence generation. Review and correction
+have separate persisted three-attempt transport ledgers. Transport interruption
+or ordinary restart cannot grant another logical correction. A malformed
+correction stops with `code: "format"`; exhausted transport stops with
+`code: "exhausted"`. Saved successful output can be reused after a checkpoint
+reload. Unclassified/permanent errors retain the existing stop behavior.
+
+Strict review policy is sticky in its checkpoint. Resume requires the explicit
+correction callback; omitting it fails configuration rather than disabling the
+gates. Evidence-generation invalidation creates a new independent review and
+correction scope, retaining the prior operation ledger; old correction output
+cannot authorize the changed evidence. Candidate/validation/approval gates remain
+in force before delivery. Without this policy, existing parsed-review callers
+retain their previous contract.
+
 ## Scope and remaining work
 
 The workflow provides candidate-bound stage gates, explicit checkpoint resume
 and opt-in durable recovery. Evidence currently binds the candidate, not policy, dependencies,
 toolchain or changed task requirements. Do not reuse checkpoints after changing
 those inputs; the later evidence-identity slice will automate invalidation.
-Structured-output extraction/correction, queue polling, diagnostics and
+Queue polling, diagnostics and
 task-selection adapters remain separate increments. Repository/run locks and
 explicit resource reconciliation are documented in [runtime isolation](workflow-runtime.md).
 

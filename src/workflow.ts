@@ -1,3 +1,5 @@
+import { extractWorkflowReview } from "./workflow-review.js";
+export { extractWorkflowReview } from "./workflow-review.js";
 /** One task through explicitly supplied project operations. No provider retries or remote defaults. */
 export interface WorkflowProject<Config> {
   readonly id: string;
@@ -113,6 +115,19 @@ export interface WorkflowCheckpoint {
   delivery?: WorkflowDelivery;
   inFlight?: "implement" | "deliver";
   recovery?: WorkflowRecoveryState;
+  /** Once enabled, ordinary resume cannot silently drop strict task-bound review extraction. */
+  reviewOutputEnabled?: true;
+  /** The single logical correction consumed for one task/candidate/implementation/evidence generation. */
+  reviewCorrection?: {
+    /** Exact logical review identity; transport retries share this scope. */
+    scope: string;
+    /** Saved before the first correction invocation. */
+    consumed: true;
+    /** Original malformed output, preserved for every transport attempt. */
+    output: unknown;
+    /** Deterministic extraction/schema failure sent to the independent reviewer. */
+    problem: string;
+  };
   repair?: { phase: WorkflowPhase; message: string };
   failure?: { code: WorkflowErrorCode; message: string };
 }
@@ -150,7 +165,9 @@ export interface WorkflowOperations<Config> {
   validate(
     context: WorkflowCandidateContext<Config>,
   ): Promise<WorkflowValidation>;
-  review(context: WorkflowReviewContext<Config>): Promise<WorkflowReview>;
+  review(
+    context: WorkflowReviewContext<Config>,
+  ): Promise<WorkflowReview | string>;
   deliver(context: WorkflowDeliveryContext<Config>): Promise<WorkflowDelivery>;
   /** Must durably replace the stored checkpoint before resolving. */
   save(checkpoint: WorkflowCheckpoint): Promise<void>;
@@ -177,6 +194,18 @@ export interface WorkflowOptions<Config> {
   readonly signal?: AbortSignal;
   /** Explicitly enable fixed durable recovery budgets. Existing callers retain fail-fast behavior. */
   readonly recovery?: WorkflowRecovery<Config>;
+  /** Strict task-bound extraction and one durable correction per candidate/evidence generation. Enables durable recovery. */
+  readonly reviewOutput?: {
+    /** Reformat the same independent findings; return raw strict JSON or a task-bound review object. */
+    correct(
+      context: WorkflowReviewContext<Config> & {
+        /** Saved malformed output; no new implementation or validation is requested. */
+        output: unknown;
+        /** Extraction/schema feedback, never an instruction to approve rejected code. */
+        problem: string;
+      },
+    ): Promise<WorkflowReview | string>;
+  };
 }
 
 export async function runWorkflow<Config>(
@@ -186,7 +215,9 @@ export async function runWorkflow<Config>(
   const state: WorkflowCheckpoint = structuredClone(
     options.checkpoint ?? { version: 1, project: project.id, phase: "select" },
   );
-  const recover = options.recovery ?? (state.recovery ? {} : undefined);
+  const recover =
+    options.recovery ??
+    (state.recovery || options.reviewOutput ? {} : undefined);
   const fail = (
     code: WorkflowErrorCode,
     message: string,
@@ -196,6 +227,15 @@ export async function runWorkflow<Config>(
   };
   const text = (value: unknown): value is string =>
     typeof value === "string" && value.trim().length > 0;
+  if (options.reviewOutput) state.reviewOutputEnabled = true;
+  if (
+    state.reviewOutputEnabled &&
+    typeof options.reviewOutput?.correct !== "function"
+  )
+    fail(
+      "configuration",
+      "The saved strict-review policy requires its explicit correction operation on resume.",
+    );
   const validTask = (value: WorkflowTask | undefined): value is WorkflowTask =>
     Boolean(
       value &&
@@ -507,6 +547,11 @@ export async function runWorkflow<Config>(
     return value;
   };
   const checkReview = (value: WorkflowReview | undefined): WorkflowReview => {
+    if (state.reviewOutputEnabled)
+      value = extractWorkflowReview(value, {
+        task: state.task!,
+        candidate: state.candidate!,
+      });
     const entries = value?.criteria;
     if (
       recover &&
@@ -632,16 +677,62 @@ export async function runWorkflow<Config>(
           case "review": {
             await checkCandidate();
             const validation = checkValidation(state.validation);
-            state.review = structuredClone(
-              checkReview(
-                await perform("review", () =>
-                  operations.review({
-                    ...candidateContext(),
-                    validation: structuredClone(validation),
-                    attempt: activeAttempt,
+            const reviewContext = () => ({
+              ...candidateContext(),
+              validation: structuredClone(validation),
+              attempt: activeAttempt,
+            });
+            let output = await perform("review", () =>
+              operations.review(reviewContext()),
+            );
+            if (state.reviewOutputEnabled) {
+              try {
+                output = extractWorkflowReview(output, {
+                  task: state.task!,
+                  candidate: state.candidate!,
+                });
+              } catch (cause) {
+                if (
+                  !(cause instanceof WorkflowOperationError) ||
+                  cause.kind !== "format"
+                )
+                  throw cause;
+                const scope = JSON.stringify({
+                  task: state.task!.id,
+                  candidate: state.candidate,
+                  implementation: state.recovery!.implementationAttempts,
+                  generation:
+                    (
+                      context() as WorkflowContext<Config> & {
+                        evidenceGeneration?: number;
+                      }
+                    ).evidenceGeneration ?? 0,
+                });
+                if (state.reviewCorrection?.scope !== scope) {
+                  state.reviewCorrection = {
+                    scope,
+                    consumed: true,
+                    output,
+                    problem: cause.message,
+                  };
+                  await persist();
+                }
+                const correction = state.reviewCorrection;
+                output = await perform(`review-correction:${scope}`, () =>
+                  options.reviewOutput!.correct({
+                    ...reviewContext(),
+                    output: structuredClone(correction.output),
+                    problem: correction.problem,
                   }),
-                ),
-              ),
+                );
+                output = extractWorkflowReview(output, {
+                  task: state.task!,
+                  candidate: state.candidate!,
+                });
+              }
+            }
+            state.review = structuredClone(
+              checkReview(output as WorkflowReview),
             );
             await advance("deliver");
             break;
