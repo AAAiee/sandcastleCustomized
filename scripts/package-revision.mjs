@@ -56,9 +56,16 @@ const git = (...arguments_) =>
   });
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const lock = git("show", `${revision}:package-lock.json`);
+// Git exports LF; a prepared Windows cache may contain equivalent CRLF bytes.
+const canonicalLock = (bytes) =>
+  bytes.toString("utf8").replaceAll("\r\n", "\n");
 assert.equal(
-  hash(readFileSync(join(dirname(dependencies), "package-lock.json"))),
-  hash(lock),
+  hash(
+    canonicalLock(
+      readFileSync(join(dirname(dependencies), "package-lock.json")),
+    ),
+  ),
+  hash(canonicalLock(lock)),
   "Prepared dependencies belong to a different lockfile",
 );
 const manifest = JSON.parse(git("show", `${revision}:package.json`));

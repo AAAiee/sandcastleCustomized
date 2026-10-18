@@ -9,7 +9,8 @@ dependency that silently changes when another checkout is edited.
 `scripts/package-revision.mjs` builds an exact committed revision in a local,
 immutable Linux Docker image using already prepared Linux dependencies. It:
 
-1. Verifies the prepared dependency lockfile matches the selected revision.
+1. Verifies the prepared dependency lockfile matches the selected revision,
+   normalizing only CRLF/LF checkout line endings for that comparison.
 2. Exports canonical tracked source with `git archive`, excluding untracked edits,
    credentials and runtime state. Git source bytes do not depend on checkout CRLF.
 3. Builds and packs in a fixed container directory with read-only dependencies,
