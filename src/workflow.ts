@@ -1,5 +1,15 @@
 import { extractWorkflowReview } from "./workflow-review.js";
 export { extractWorkflowReview } from "./workflow-review.js";
+export {
+  createWorkflowPacket,
+  workflowPacketPolicy,
+} from "./workflow-packets.js";
+export type {
+  WorkflowImplementationPacket,
+  WorkflowRepairPacket,
+  WorkflowReviewPacket,
+  WorkflowCorrectionPacket,
+} from "./workflow-packets.js";
 /** One task through explicitly supplied project operations. No provider retries or remote defaults. */
 export interface WorkflowProject<Config> {
   readonly id: string;
@@ -15,10 +25,22 @@ export interface WorkflowTask {
 }
 
 export interface WorkflowValidation {
+  /** Only failed checks, with concise diagnostics and exact raw evidence locations. */
+  readonly failures?: readonly WorkflowFailure[];
   /** Current inputs bound by runWorkflow after the host operation succeeds. */
   readonly identity?: WorkflowValidationIdentity;
   readonly candidate: string;
   readonly passed: boolean;
+  readonly evidence: readonly string[];
+}
+
+/** Actionable failure detail carried unchanged into bounded implementation repair. */
+export interface WorkflowFailure {
+  /** Exact check or acceptance criterion identity. */
+  readonly check: string;
+  /** Concise failure observation; full output belongs at the evidence locations. */
+  readonly diagnostic: string;
+  /** Exact locations of the raw output/report for this invocation. */
   readonly evidence: readonly string[];
 }
 
@@ -66,6 +88,7 @@ export class WorkflowOperationError extends Error {
     readonly kind: "transport" | "substantive" | "permanent" | "format",
     message: string,
     cause?: unknown,
+    readonly failures?: readonly WorkflowFailure[],
   ) {
     super(message, { cause });
     this.name = "WorkflowOperationError";
@@ -136,7 +159,11 @@ export interface WorkflowCheckpoint {
     /** Deterministic extraction/schema failure sent to the independent reviewer. */
     problem: string;
   };
-  repair?: { phase: WorkflowPhase; message: string };
+  repair?: {
+    phase: WorkflowPhase;
+    message: string;
+    failures?: readonly WorkflowFailure[];
+  };
   /** Durable evidence generation; completed operations from older inputs are never reused. */
   evidence?: {
     generation: number;
@@ -619,6 +646,8 @@ export async function runWorkflow<Config>(
       throw new WorkflowOperationError(
         "substantive",
         `Validation failed: ${value.evidence.join("; ")}`,
+        undefined,
+        value.failures,
       );
     if (
       !value ||
@@ -669,6 +698,14 @@ export async function runWorkflow<Config>(
             .map((entry) => entry.evidence)
             .join("; ") || "Independent approval denied"
         }`,
+        undefined,
+        entries
+          .filter((entry) => !entry.satisfied)
+          .map((entry) => ({
+            check: entry.id,
+            diagnostic: entry.evidence,
+            evidence: [],
+          })),
       );
     if (
       !value ||
@@ -1016,7 +1053,13 @@ export async function runWorkflow<Config>(
             "Implementation repair requires a valid selected task.",
             cause,
           );
-        state.repair = { phase: state.phase, message: cause.message };
+        state.repair = {
+          phase: state.phase,
+          message: cause.message,
+          ...(cause.failures
+            ? { failures: structuredClone(cause.failures) }
+            : {}),
+        };
         if (state.recovery!.implementationAttempts >= 3)
           fail(
             "exhausted",

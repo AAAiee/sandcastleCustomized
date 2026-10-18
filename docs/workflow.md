@@ -238,6 +238,8 @@ not candidate SHA alone. Outcomes remain in current host reports and checkpoints
 a candidate commit does not need to contain its own SHA. Public validation/review
 results carry the identity under which their host operations ran.
 
+<<<<<<< HEAD
+
 ### Optional diagnostics before full acceptance
 
 Pass `diagnostics: async context => ({candidate: context.candidate, passed, evidence})`
@@ -260,3 +262,57 @@ to `withPreparedWorktree`. A false result stops before initial checkout or befor
 restoration, preserving the candidate and recovery record for reconciliation.
 Pair this with a runtime resource close assertion so unknown process ownership
 retains the runtime lock. Never restore a checkout while descendants may write it.
+=======
+
+## Compact complete stage context
+
+`createWorkflowPacket` is a pure renderer exported from `/workflow`. It has no
+project defaults, file access, sessions or cached packets. The consumer supplies
+concrete prompts, scope, paths, commands and readable evidence locations.
+
+```ts
+import {
+  createWorkflowPacket,
+  workflowPacketPolicy,
+} from "@ai-hero/sandcastle/workflow";
+
+const packet = createWorkflowPacket({
+  stage: "implement",
+  task, // exact task ID and every criterion, included once
+  scope:
+    "Implement the requested behavior within the existing module boundary.",
+  branch: "task/current",
+  entrypoints: ["src/module.ts"],
+  commands: ["npm test -- module"],
+  references: ["docs/current-requirements.md"],
+});
+```
+
+Supply scope without a second copy of the criteria or a bulk issue body. The
+implementation packet contains complete scope and criteria, navigation and
+commands. Repair instead receives a reference to that complete requirements
+packet and only the current failed stage/check, diagnostic and raw evidence
+locations. `WorkflowValidation.failures` carries `{check, diagnostic, evidence}`
+unchanged into `context.repair.failures`; a consumer-classified substantive
+`WorkflowOperationError` can also supply those failures as its fourth constructor
+argument. A valid negative independent review identifies failed criterion IDs.
+
+Review packets contain every criterion, immutable base/candidate, all changed
+paths, the full diff command and current validation summary/locations. Format
+correction packets contain the relevant extraction/schema problem, a reference
+to the exact malformed output and the exact task/candidate/criterion output
+contract. They instruct preservation of the actual rejection or approval; the
+renderer grants no correction attempts and never converts a rejection to an
+approval. Existing durable workflow correction and repair budgets still apply.
+
+Nothing is truncated by criterion, path, log or token count. Full code and raw
+evidence stay available on demand. The consumer must materialize referenced host
+artifacts inside the sandbox mount when host paths are not directly readable,
+retain immutable copies by content/generation/attempt, and preserve exact source
+locations. Treat model-written evidence as text, not a request to read arbitrary
+host files. Bind `workflowPacketPolicy`, current review prompt/context and actual
+referenced content identities into `evidence.review`; pathname-only identities
+cannot detect changed reference bytes. Volatile invocation names must not change
+review eligibility by themselves.
+
+> > > > > > > 2549177c7aa55b8803d7efd2b84fc835230e7083
