@@ -431,9 +431,16 @@ export async function withPreparedWorktree<T>(
     candidate: string;
     command: Command;
     saveRecovery: (state: WorktreeRecovery) => Promise<void>;
+    /** A process owner must confirm all prepared-tree writers stopped before checkout or restoration. */
+    quiescent?: () => boolean | Promise<boolean>;
   },
   action: (prepared: string) => Promise<T>,
 ): Promise<T> {
+  if (options.quiescent && !(await options.quiescent()))
+    throw new IntegrationError(
+      "uncertain",
+      "Prepared process quiescence is unknown; no checkout or preservation was started.",
+    );
   const git = async (cwd: string, ...args: string[]) => {
     const result = await options.command("git", args, { cwd });
     if (result.exitCode !== 0)
@@ -554,6 +561,10 @@ export async function withPreparedWorktree<T>(
     actionError = cause;
   }
   try {
+    if (options.quiescent && !(await options.quiescent()))
+      throw new Error(
+        "Owned processes may still write this prepared checkout; restoration requires explicit quiescence reconciliation.",
+      );
     if (
       (preservationStarted && !recovery.stash) ||
       (await git(prepared, "status", "--porcelain")).trim()

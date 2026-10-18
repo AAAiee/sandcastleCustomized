@@ -151,7 +151,11 @@ it("missing saved diagnostic identity cannot authorize reuse of otherwise matchi
   };
   await runWorkflow({ ...f.options, evidence });
   const saved = f.load();
-  delete saved.diagnostic!.identity;
+  saved.diagnostic = {
+    candidate: saved.candidate!,
+    passed: true,
+    evidence: saved.diagnostic!.evidence,
+  };
   f.events.length = 0;
   await runWorkflow({ ...f.options, evidence, checkpoint: saved });
   expect(f.events).toEqual(["diagnose", "full-acceptance", "deliver"]);

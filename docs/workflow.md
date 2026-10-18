@@ -244,8 +244,8 @@ Pass `diagnostics: async context => ({candidate: context.candidate, passed, evid
 to `runWorkflow` for a project-owned incremental check. The workflow runs
 `implement → diagnose → validate → review → deliver`; a diagnostic pass cannot
 replace `operations.validate`. The checkpoint stores `diagnostic` independently
-and makes the diagnostic callback required on resume. Failed diagnostic evidence
-uses the same bounded substantive repair as failed validation. Explicit transport
+and makes the diagnostic callback required on resume. With explicit recovery
+enabled, failed diagnostic evidence uses the same bounded substantive repair as failed validation. Explicit transport
 errors consume only that operation's durable transport budget. Changing validation
 inputs invalidates both checks without requesting a new implementation. A prior
 ready checkpoint newly opting into diagnostics reruns diagnostics and full
@@ -254,3 +254,9 @@ acceptance before it can deliver again.
 Native commands, fixture mappings and full acceptance requirements remain in the
 consuming project. The reusable package has no Editor paths, issue map, build
 tool assumptions or automatic publication behavior.
+
+Prepared native consumers can pass `quiescent: () => boolean | Promise<boolean>`
+to `withPreparedWorktree`. A false result stops before initial checkout or before
+restoration, preserving the candidate and recovery record for reconciliation.
+Pair this with a runtime resource close assertion so unknown process ownership
+retains the runtime lock. Never restore a checkout while descendants may write it.
