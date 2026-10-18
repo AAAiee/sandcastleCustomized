@@ -238,8 +238,6 @@ not candidate SHA alone. Outcomes remain in current host reports and checkpoints
 a candidate commit does not need to contain its own SHA. Public validation/review
 results carry the identity under which their host operations ran.
 
-<<<<<<< HEAD
-
 ### Optional diagnostics before full acceptance
 
 Pass `diagnostics: async context => ({candidate: context.candidate, passed, evidence})`
@@ -262,7 +260,6 @@ to `withPreparedWorktree`. A false result stops before initial checkout or befor
 restoration, preserving the candidate and recovery record for reconciliation.
 Pair this with a runtime resource close assertion so unknown process ownership
 retains the runtime lock. Never restore a checkout while descendants may write it.
-=======
 
 ## Compact complete stage context
 
