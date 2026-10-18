@@ -2,7 +2,11 @@ import { afterEach, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runWorkflow, type WorkflowCheckpoint } from "./workflow.js";
+import {
+  runWorkflow,
+  WorkflowOperationError,
+  type WorkflowCheckpoint,
+} from "./workflow.js";
 
 const directories: string[] = [];
 afterEach(() =>
@@ -198,4 +202,63 @@ it("treats a missing validation report as insufficient on reload", async () => {
   f.events.length = 0;
   await runWorkflow({ ...f.options, checkpoint });
   expect(f.events).toEqual(["validate", "review", "deliver"]);
+});
+
+it("does not resume a pending format correction under stale evidence after JSON reload", async () => {
+  const f = fixture();
+  let offline = true;
+  const correctedPolicies: string[] = [];
+  const options = {
+    ...f.options,
+    recovery: {
+      wait: async () => {
+        if (offline) throw new Error("Restart during correction backoff");
+      },
+    },
+    operations: {
+      ...f.options.operations,
+      review: async () => {
+        f.events.push("review");
+        return "Malformed review";
+      },
+    },
+    reviewOutput: {
+      correct: async (
+        context: import("./workflow.js").WorkflowReviewContext<{}>,
+      ) => {
+        correctedPolicies.push(context.validation.identity!.policy);
+        if (offline)
+          throw new WorkflowOperationError(
+            "transport",
+            "Reviewer disconnected",
+          );
+        f.events.push("correct");
+        return {
+          task: "task",
+          candidate: "sha-a",
+          approved: true,
+          criteria: [
+            {
+              id: "C1",
+              satisfied: true,
+              evidence: "Reviewed current host result",
+            },
+          ],
+        };
+      },
+    },
+  };
+  await expect(runWorkflow(options)).rejects.toThrow(
+    "Restart during correction backoff",
+  );
+  const previousScope = f.load().reviewCorrection!.scope;
+  f.inputs.policy = "full-v2";
+  f.events.length = 0;
+  offline = false;
+  const resumed = await runWorkflow({ ...options, checkpoint: f.load() });
+  expect(f.events).toEqual(["validate", "review", "correct", "deliver"]);
+  expect(correctedPolicies).toEqual(["full-v1", "full-v2"]);
+  expect(resumed.reviewCorrection!.scope).not.toBe(previousScope);
+  expect(resumed.review?.identity?.validation.policy).toBe("full-v2");
+  expect(resumed.recovery?.implementationAttempts).toBe(1);
 });
