@@ -739,7 +739,11 @@ export async function runWorkflow<Config>(
       (!["diagnose", "validate"].includes(state.phase) && !state.validation) ||
       (state.validation &&
         (state.validation.passed !== true ||
-          !equal(state.validation.identity, identity)))
+          !equal(state.validation.identity, identity))) ||
+      (state.diagnosticsEnabled &&
+        state.diagnostic &&
+        (state.diagnostic.passed !== true ||
+          !equal(state.diagnostic.identity, identity)))
     ) {
       if (state.inFlight === "deliver")
         fail(

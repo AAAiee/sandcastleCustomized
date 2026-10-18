@@ -138,3 +138,21 @@ it("policy changes rerun diagnostics and full acceptance without a new implement
   await runWorkflow({ ...f.options, evidence, checkpoint: f.load() });
   expect(f.events).toEqual(["diagnose", "full-acceptance", "deliver"]);
 });
+
+it("missing saved diagnostic identity cannot authorize reuse of otherwise matching final evidence", async () => {
+  const f = fixture();
+  const evidence = {
+    validation: async () => ({
+      policy: "full",
+      dependencies: "pins",
+      environment: "host",
+    }),
+    review: async () => "review",
+  };
+  await runWorkflow({ ...f.options, evidence });
+  const saved = f.load();
+  delete saved.diagnostic!.identity;
+  f.events.length = 0;
+  await runWorkflow({ ...f.options, evidence, checkpoint: saved });
+  expect(f.events).toEqual(["diagnose", "full-acceptance", "deliver"]);
+});

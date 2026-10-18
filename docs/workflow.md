@@ -237,6 +237,7 @@ Consumers must preserve or version local receipts by complete evidence/approval,
 not candidate SHA alone. Outcomes remain in current host reports and checkpoints;
 a candidate commit does not need to contain its own SHA. Public validation/review
 results carry the identity under which their host operations ran.
+
 ### Optional diagnostics before full acceptance
 
 Pass `diagnostics: async context => ({candidate: context.candidate, passed, evidence})`
@@ -253,4 +254,3 @@ acceptance before it can deliver again.
 Native commands, fixture mappings and full acceptance requirements remain in the
 consuming project. The reusable package has no Editor paths, issue map, build
 tool assumptions or automatic publication behavior.
-
