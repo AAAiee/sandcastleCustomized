@@ -136,6 +136,11 @@ for repository writer locking, project/run-scoped records and compatible resourc
 lifecycle. [Runtime isolation](docs/workflow-runtime.md) describes identity checks,
 resource reuse and outcomes that require explicit inspection.
 
+Wrap stages and native checks with `createWorkflowMeasurements` from
+`@ai-hero/sandcastle/workflow/measurements` for persisted attempts, outcomes,
+duration and scoped token observations. [Measurement accounting](docs/workflow-measurements.md)
+explains unavailable totals, cached input and original SDK snapshot limitations.
+
 [Pinned builds and deliberate updates](docs/reproducible-build.md) describes
 offline reproduction from an exact source revision and installing the resulting
 archive without mutable npm links.

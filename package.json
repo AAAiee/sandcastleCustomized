@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./workflow/measurements": {
+      "import": "./dist/workflow-measurements.js",
+      "types": "./dist/workflow-measurements.d.ts"
+    },
     "./workflow/runtime": {
       "import": "./dist/workflow-runtime.js",
       "types": "./dist/workflow-runtime.d.ts"
@@ -114,6 +118,7 @@
     "docs/workflow.md",
     "docs/workflow-integrations.md",
     "docs/workflow-runtime.md",
+    "docs/workflow-measurements.md",
     "docs/reproducible-build.md"
   ]
 }
