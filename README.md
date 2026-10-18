@@ -132,6 +132,9 @@ See [the workflow contract](docs/workflow.md) for operation requirements,
 candidate/review gates and checkpoint behavior. New callers can opt into
 `recovery: {}` for persisted implementation/transport budgets and explicit
 side-effect reconciliation; unknown outcomes stop safely.
+An explicit `reviewOutput: { correct }` policy extracts task-bound independent
+reviews before spending one persisted format correction; valid rejection still
+requests code repair. See [strict review output](docs/workflow.md#strict-review-output-and-one-correction).
 
 Wrap effects in `withWorkflowRuntime` from `@ai-hero/sandcastle/workflow/runtime`
 for repository writer locking, project/run-scoped records and compatible resource
