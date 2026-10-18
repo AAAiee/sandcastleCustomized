@@ -237,3 +237,20 @@ Consumers must preserve or version local receipts by complete evidence/approval,
 not candidate SHA alone. Outcomes remain in current host reports and checkpoints;
 a candidate commit does not need to contain its own SHA. Public validation/review
 results carry the identity under which their host operations ran.
+### Optional diagnostics before full acceptance
+
+Pass `diagnostics: async context => ({candidate: context.candidate, passed, evidence})`
+to `runWorkflow` for a project-owned incremental check. The workflow runs
+`implement → diagnose → validate → review → deliver`; a diagnostic pass cannot
+replace `operations.validate`. The checkpoint stores `diagnostic` independently
+and makes the diagnostic callback required on resume. Failed diagnostic evidence
+uses the same bounded substantive repair as failed validation. Explicit transport
+errors consume only that operation's durable transport budget. Changing validation
+inputs invalidates both checks without requesting a new implementation. A prior
+ready checkpoint newly opting into diagnostics reruns diagnostics and full
+acceptance before it can deliver again.
+
+Native commands, fixture mappings and full acceptance requirements remain in the
+consuming project. The reusable package has no Editor paths, issue map, build
+tool assumptions or automatic publication behavior.
+

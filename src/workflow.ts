@@ -42,6 +42,7 @@ export interface WorkflowDelivery {
 export type WorkflowPhase =
   | "select"
   | "implement"
+  | "diagnose"
   | "validate"
   | "review"
   | "deliver"
@@ -115,6 +116,9 @@ export interface WorkflowCheckpoint {
   task?: WorkflowTask;
   candidate?: string;
   validation?: WorkflowValidation;
+  diagnostic?: WorkflowValidation;
+  /** Diagnostics cannot be silently omitted on resume. Their pass never replaces full validation. */
+  diagnosticsEnabled?: true;
   review?: WorkflowReview;
   delivery?: WorkflowDelivery;
   inFlight?: "implement" | "deliver";
@@ -200,6 +204,10 @@ export class WorkflowError extends Error {
 }
 
 export interface WorkflowOptions<Config> {
+  /** Optional project-supplied incremental diagnostics, before full acceptance. */
+  readonly diagnostics?: (
+    context: WorkflowCandidateContext<Config>,
+  ) => Promise<WorkflowValidation>;
   /** Current project-owned policy/dependency/host inputs. Saved identities are never defaults. */
   readonly evidence?: WorkflowEvidence<Config>;
   readonly project: WorkflowProject<Config>;
@@ -275,6 +283,12 @@ export async function runWorkflow<Config>(
   const text = (value: unknown): value is string =>
     typeof value === "string" && value.trim().length > 0;
   if (options.reviewOutput) state.reviewOutputEnabled = true;
+  if (options.diagnostics) state.diagnosticsEnabled = true;
+  if (state.diagnosticsEnabled && typeof options.diagnostics !== "function")
+    fail(
+      "configuration",
+      "The saved diagnostic policy requires its explicit operation on resume.",
+    );
   if (
     state.reviewOutputEnabled &&
     typeof options.reviewOutput?.correct !== "function"
@@ -317,6 +331,7 @@ export async function runWorkflow<Config>(
     ![
       "select",
       "implement",
+      "diagnose",
       "validate",
       "review",
       "deliver",
@@ -324,11 +339,14 @@ export async function runWorkflow<Config>(
       "idle",
     ].includes(state.phase) ||
     (!["select", "idle"].includes(state.phase) && !validTask(state.task)) ||
-    (["validate", "review", "deliver", "ready"].includes(state.phase) &&
+    (["diagnose", "validate", "review", "deliver", "ready"].includes(
+      state.phase,
+    ) &&
       !text(state.candidate)) ||
     (state.inFlight !== undefined &&
       (state.inFlight !== state.phase ||
-        !["implement", "deliver"].includes(state.inFlight)))
+        !["implement", "deliver"].includes(state.inFlight))) ||
+    (state.phase === "diagnose" && !state.diagnosticsEnabled)
   )
     fail(
       "invalid-checkpoint",
@@ -437,7 +455,11 @@ export async function runWorkflow<Config>(
       state.evidence && name !== "implement" && name !== "select"
         ? `${name}:evidence-${state.evidence.generation}`
         : name;
-    return `${scopedName}/${state.recovery!.implementationAttempts}`;
+    const diagnosticScope =
+      state.diagnosticsEnabled && name !== "implement" && name !== "select"
+        ? ":diagnostics"
+        : "";
+    return `${scopedName}${diagnosticScope}/${state.recovery!.implementationAttempts}`;
   };
   const perform = async <T>(
     name: string,
@@ -714,7 +736,7 @@ export async function runWorkflow<Config>(
     };
     if (
       !equal(state.evidence.validation, identity) ||
-      (state.phase !== "validate" && !state.validation) ||
+      (!["diagnose", "validate"].includes(state.phase) && !state.validation) ||
       (state.validation &&
         (state.validation.passed !== true ||
           !equal(state.validation.identity, identity)))
@@ -728,12 +750,13 @@ export async function runWorkflow<Config>(
       state.evidence.validation = identity;
       delete state.evidence.review;
       delete state.validation;
+      delete state.diagnostic;
       delete state.review;
       delete state.delivery;
-      await advance("validate");
+      await advance(state.diagnosticsEnabled ? "diagnose" : "validate");
       return true;
     }
-    if (state.phase === "validate") return false;
+    if (["diagnose", "validate"].includes(state.phase)) return false;
     const validation = checkValidation(state.validation);
     const inputs = await options.evidence.review({
       ...candidateContext(),
@@ -772,11 +795,31 @@ export async function runWorkflow<Config>(
       signal?.throwIfAborted();
       try {
         if (
-          ["validate", "review", "deliver", "ready"].includes(state.phase) &&
+          ["diagnose", "validate", "review", "deliver", "ready"].includes(
+            state.phase,
+          ) &&
           options.evidence
         ) {
           await checkCandidate();
           if (await refreshEvidence()) continue;
+        }
+        if (
+          state.diagnosticsEnabled &&
+          ["validate", "review", "deliver", "ready"].includes(state.phase)
+        ) {
+          if (!state.diagnostic) {
+            if (state.inFlight)
+              fail(
+                "uncertain",
+                "Diagnostics are missing while delivery is unresolved; reconcile the earlier effect first.",
+              );
+            delete state.validation;
+            delete state.review;
+            delete state.delivery;
+            await advance("diagnose");
+            continue;
+          }
+          checkValidation(state.diagnostic);
         }
         switch (state.phase) {
           case "select": {
@@ -811,6 +854,26 @@ export async function runWorkflow<Config>(
             if (!text(candidate))
               fail("gate", "Implementation did not identify its candidate.");
             state.candidate = candidate;
+            await advance(state.diagnosticsEnabled ? "diagnose" : "validate");
+            break;
+          }
+          case "diagnose": {
+            await checkCandidate();
+            state.diagnostic = structuredClone(
+              checkValidation(
+                await perform("diagnose", () =>
+                  options.diagnostics!({
+                    ...candidateContext(),
+                    attempt: activeAttempt,
+                  }),
+                ),
+              ),
+            );
+            if (state.evidence)
+              state.diagnostic = {
+                ...state.diagnostic,
+                identity: structuredClone(state.evidence.validation!),
+              };
             await advance("validate");
             break;
           }
@@ -959,6 +1022,7 @@ export async function runWorkflow<Config>(
         state.recovery!.implementationAttempts++;
         delete state.candidate;
         delete state.validation;
+        delete state.diagnostic;
         delete state.review;
         delete state.delivery;
         await advance("implement");
