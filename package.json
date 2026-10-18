@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./workflow": {
+      "import": "./dist/workflow.js",
+      "types": "./dist/workflow.d.ts"
+    },
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
@@ -98,6 +102,7 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "docs/workflow.md"
   ]
 }

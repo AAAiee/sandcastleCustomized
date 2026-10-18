@@ -103,6 +103,28 @@ You can also [create your own provider](#custom-sandbox-providers) using `create
 
 ## API
 
+### Single-task workflow (customized fork)
+
+The opt-in `@ai-hero/sandcastle/workflow` entrypoint runs one task through
+implementation, host validation, independent review and explicitly supplied
+delivery. Project identity, task selection, criteria, candidate lookup,
+persistence and delivery are consumer operations. It has no default GitHub
+writes, merge, issue closure or provider retries.
+
+```typescript
+import { runWorkflow } from "@ai-hero/sandcastle/workflow";
+
+// projectOperations is the consumer's implementation of WorkflowOperations.
+const result = await runWorkflow({
+  project: { id: "my-project", config: projectConfiguration },
+  operations: projectOperations,
+  checkpoint: savedCheckpoint, // omit on the first invocation
+});
+```
+
+See [the workflow contract](docs/workflow.md) for operation requirements,
+candidate/review gates, checkpoint behavior and the limits of this first slice.
+
 Sandcastle exports a programmatic `run()` function for use in scripts, CI pipelines, or custom tooling. The examples below use `docker()`, but any `SandboxProvider` works in its place.
 
 ```typescript
