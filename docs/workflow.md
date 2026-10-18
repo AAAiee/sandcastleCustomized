@@ -204,3 +204,36 @@ The tests in `src/workflow.test.ts` exercise the exported function with a minima
 consumer and actual JSON checkpoint reloads. They cover successful delivery,
 failed gates, changed candidates, resumed review, unknown errors, uncertain
 effects, failed persistence and cancellation without models or credentials.
+
+## Current validation and independent review inputs
+
+Opt into `runWorkflow({ evidence: { validation, review }, ...options })` to make
+resume check fresh project observations. `validation(context)` returns nonempty
+`{ policy, dependencies, environment }` content identities. The workflow adds
+`candidate` itself. Policy includes the actual acceptance plan and validator;
+dependencies include pinned and observed installed/prepared dependencies;
+environment identifies the actual runner, toolchain and relevant graphics host.
+`review(context)` returns the current review policy/context identity, including
+relevant prompts and agent policy. Task criteria and validation identity are
+bound automatically. These callbacks must discover current values, never return
+a saved identity as a default. Missing discovery stops; it is not a matching
+"unknown" environment. This generic API does not discover native project tools.
+
+Passed matching evidence and independent approval survive restart. Missing legacy
+identities, absent/failed host evidence, or changed validation inputs return to
+validation on the same code. Changed review inputs return to independent review
+while matching host validation is retained. No implementation attempt is spent by
+invalidation. Durable `evidence.generation` scopes validation/review/delivery
+operation records, preserving old counters/results for inspection. The generation
+is exposed as `context.evidenceGeneration` for project session records. Once an
+evidence policy has been saved, omitting the callbacks on resume is refused.
+Legacy checkpoints whose implementation budgets are unknown still follow the
+separate recovery refusal; identity support cannot invent those budgets.
+
+Before delivery or reuse of a ready checkpoint, the host candidate and current
+inputs are checked again. Unresolved delivery plus changed inputs stops for
+reconciliation; it cannot be replayed as a new effect under stale approval.
+Consumers must preserve or version local receipts by complete evidence/approval,
+not candidate SHA alone. Outcomes remain in current host reports and checkpoints;
+a candidate commit does not need to contain its own SHA. Public validation/review
+results carry the identity under which their host operations ran.

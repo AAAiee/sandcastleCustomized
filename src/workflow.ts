@@ -15,12 +15,16 @@ export interface WorkflowTask {
 }
 
 export interface WorkflowValidation {
+  /** Current inputs bound by runWorkflow after the host operation succeeds. */
+  readonly identity?: WorkflowValidationIdentity;
   readonly candidate: string;
   readonly passed: boolean;
   readonly evidence: readonly string[];
 }
 
 export interface WorkflowReview {
+  /** Validation, task and independent review inputs covered by this result. */
+  readonly identity?: WorkflowReviewIdentity;
   readonly candidate: string;
   readonly approved: boolean;
   readonly criteria: readonly {
@@ -129,10 +133,18 @@ export interface WorkflowCheckpoint {
     problem: string;
   };
   repair?: { phase: WorkflowPhase; message: string };
+  /** Durable evidence generation; completed operations from older inputs are never reused. */
+  evidence?: {
+    generation: number;
+    validation?: WorkflowValidationIdentity;
+    review?: WorkflowReviewIdentity;
+  };
   failure?: { code: WorkflowErrorCode; message: string };
 }
 
 export interface WorkflowContext<Config> {
+  /** Evidence generation for context-bound consumer records such as correction sessions. */
+  readonly evidenceGeneration?: number;
   readonly project: WorkflowProject<Config>;
   readonly task: WorkflowTask;
   readonly signal?: AbortSignal;
@@ -188,6 +200,8 @@ export class WorkflowError extends Error {
 }
 
 export interface WorkflowOptions<Config> {
+  /** Current project-owned policy/dependency/host inputs. Saved identities are never defaults. */
+  readonly evidence?: WorkflowEvidence<Config>;
   readonly project: WorkflowProject<Config>;
   readonly operations: WorkflowOperations<Config>;
   readonly checkpoint?: WorkflowCheckpoint;
@@ -206,6 +220,39 @@ export interface WorkflowOptions<Config> {
       },
     ): Promise<WorkflowReview | string>;
   };
+}
+
+/** Fresh project observations, represented by stable content identities rather than outcomes. */
+export interface WorkflowValidationInputs {
+  /** Final validation plan, selectors and validator/adapter policy content. */
+  readonly policy: string;
+  /** Pinned dependencies plus actual installed/prepared dependency observations. */
+  readonly dependencies: string;
+  /** Relevant actual runner, toolchain and graphics environment. Unavailable is an error. */
+  readonly environment: string;
+}
+/** Validation inputs plus the actual code candidate checked by the workflow. */
+export interface WorkflowValidationIdentity extends WorkflowValidationInputs {
+  /** Exact candidate SHA or equivalent immutable project identity. */
+  readonly candidate: string;
+}
+/** Complete independent review eligibility, separate from validation policy. */
+export interface WorkflowReviewIdentity {
+  /** Host validation inputs covered by independent review. */
+  readonly validation: WorkflowValidationIdentity;
+  /** Project review policy/context identity, including relevant prompts and model policy. */
+  readonly inputs: string;
+  /** Task scope and criteria covered by the reviewer. */
+  readonly task: WorkflowTask;
+}
+/** Opt-in evidence freshness policy. Once persisted, fresh discovery remains required on resume. */
+export interface WorkflowEvidence<Config> {
+  /** Discover current inputs before validation, review, delivery and ready reuse. */
+  validation(
+    context: WorkflowCandidateContext<Config>,
+  ): Promise<WorkflowValidationInputs>;
+  /** Discover current independent review policy and context. */
+  review(context: WorkflowReviewContext<Config>): Promise<string>;
 }
 
 export async function runWorkflow<Config>(
@@ -327,6 +374,17 @@ export async function runWorkflow<Config>(
       "uncertain",
       `The earlier ${state.inFlight} may have performed a side effect. Reconcile it before resuming.`,
     );
+  if (state.evidence && !options.evidence)
+    fail(
+      "configuration",
+      "Current evidence inputs are required to resume this checkpoint.",
+    );
+  if (
+    state.evidence &&
+    (!Number.isSafeInteger(state.evidence.generation) ||
+      state.evidence.generation < 0)
+  )
+    fail("invalid-checkpoint", "Evidence generation is invalid.");
 
   const persist = async () => {
     try {
@@ -350,6 +408,7 @@ export async function runWorkflow<Config>(
     task: structuredClone(state.task!),
     signal,
     repair: state.repair,
+    evidenceGeneration: state.evidence?.generation,
   });
   const candidateContext = (): WorkflowCandidateContext<Config> => ({
     ...context(),
@@ -373,6 +432,13 @@ export async function runWorkflow<Config>(
         signal?.addEventListener("abort", aborted, { once: true });
       }));
   let activeAttempt: WorkflowAttempt | undefined;
+  const operationKey = (name: string) => {
+    const scopedName =
+      state.evidence && name !== "implement" && name !== "select"
+        ? `${name}:evidence-${state.evidence.generation}`
+        : name;
+    return `${scopedName}/${state.recovery!.implementationAttempts}`;
+  };
   const perform = async <T>(
     name: string,
     action: () => Promise<T>,
@@ -381,7 +447,7 @@ export async function runWorkflow<Config>(
   ): Promise<T> => {
     if (!recover) return action();
     const recovery = state.recovery!;
-    const key = `${name}/${recovery.implementationAttempts}`;
+    const key = operationKey(name);
     const record = (recovery.operations[key] ??= {
       attempts: 0,
       status: "interrupted",
@@ -500,7 +566,7 @@ export async function runWorkflow<Config>(
     while (
       recover &&
       state.recovery!.operations[
-        `candidate:${state.phase}:${observation}/${state.recovery!.implementationAttempts}`
+        operationKey(`candidate:${state.phase}:${observation}`)
       ]?.status === "completed"
     )
       observation++;
@@ -617,12 +683,101 @@ export async function runWorkflow<Config>(
     return value;
   };
 
+  const equal = (a: unknown, b: unknown) =>
+    JSON.stringify(a) === JSON.stringify(b);
+  const refreshEvidence = async (): Promise<boolean> => {
+    if (!options.evidence) return false;
+    state.evidence ??= {
+      generation: Math.max(
+        0,
+        ...Object.keys(state.recovery?.operations ?? {}).map((key) =>
+          Number(key.match(/:evidence-(\d+)\//)?.[1] ?? 0),
+        ),
+      ),
+    };
+    const supplied = await options.evidence.validation(candidateContext());
+    if (
+      !supplied ||
+      !text(supplied.policy) ||
+      !text(supplied.dependencies) ||
+      !text(supplied.environment)
+    )
+      fail(
+        "configuration",
+        "Evidence identity requires current policy, pinned dependencies and relevant host environment.",
+      );
+    const identity = {
+      candidate: state.candidate!,
+      policy: supplied.policy,
+      dependencies: supplied.dependencies,
+      environment: supplied.environment,
+    };
+    if (
+      !equal(state.evidence.validation, identity) ||
+      (state.phase !== "validate" && !state.validation) ||
+      (state.validation &&
+        (state.validation.passed !== true ||
+          !equal(state.validation.identity, identity)))
+    ) {
+      if (state.inFlight === "deliver")
+        fail(
+          "uncertain",
+          "Delivery inputs changed while its earlier effect is unresolved; reconcile that effect first.",
+        );
+      state.evidence.generation++;
+      state.evidence.validation = identity;
+      delete state.evidence.review;
+      delete state.validation;
+      delete state.review;
+      delete state.delivery;
+      await advance("validate");
+      return true;
+    }
+    if (state.phase === "validate") return false;
+    const validation = checkValidation(state.validation);
+    const inputs = await options.evidence.review({
+      ...candidateContext(),
+      validation,
+    });
+    if (!text(inputs))
+      fail("configuration", "Current independent review inputs are required.");
+    const reviewIdentity = {
+      validation: identity,
+      inputs,
+      task: structuredClone(state.task!),
+    };
+    if (
+      !equal(state.evidence.review, reviewIdentity) ||
+      (state.review && !equal(state.review.identity, reviewIdentity))
+    ) {
+      if (state.inFlight === "deliver")
+        fail(
+          "uncertain",
+          "Review inputs changed while delivery is unresolved; reconcile that effect first.",
+        );
+      state.evidence.generation++;
+      state.evidence.review = reviewIdentity;
+      delete state.review;
+      delete state.delivery;
+      await advance("review");
+      return true;
+    }
+    return false;
+  };
+
   try {
     signal?.throwIfAborted();
     if (!options.checkpoint) await persist();
     for (;;) {
       signal?.throwIfAborted();
       try {
+        if (
+          ["validate", "review", "deliver", "ready"].includes(state.phase) &&
+          options.evidence
+        ) {
+          await checkCandidate();
+          if (await refreshEvidence()) continue;
+        }
         switch (state.phase) {
           case "select": {
             const selected = await perform("select", () =>
@@ -671,6 +826,11 @@ export async function runWorkflow<Config>(
                 ),
               ),
             );
+            if (state.evidence)
+              state.validation = {
+                ...state.validation,
+                identity: structuredClone(state.evidence.validation!),
+              };
             await advance("review");
             break;
           }
@@ -734,6 +894,11 @@ export async function runWorkflow<Config>(
             state.review = structuredClone(
               checkReview(output as WorkflowReview),
             );
+            if (state.evidence)
+              state.review = {
+                ...state.review,
+                identity: structuredClone(state.evidence.review!),
+              };
             await advance("deliver");
             break;
           }
