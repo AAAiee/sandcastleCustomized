@@ -63,8 +63,9 @@ One exclusive writer lock covers the common Git repository, so two linked
 worktrees or project/run identities cannot execute conflicting callbacks. A
 second invocation fails with `WorkflowRuntimeError.code === "locked"`; it does
 not wait forever or steal the lock based on a PID. Lock owner, PID, project/run and
-creation time are recorded for inspection. Interrupted processes require explicit
-reconciliation; automatic stale-lock recovery belongs to the later recovery work.
+creation time are recorded for inspection, along with host and compatibility.
+Interrupted processes require explicit reconciliation; no stale lock is stolen
+automatically.
 
 ## Compatible resource reuse
 
@@ -82,7 +83,33 @@ released. After a normal callback failure, successfully closed resources allow
 the original failure to propagate and the lock to release. If creation throws
 without returning a handle, or cleanup throws, the lock remains: the resource
 outcome needs inspection before replay. Errors use `cleanup` and retain causes.
-No provider-message matching, retry budgets or automatic repair is introduced.
+This resource scope does not guess provider error meanings or automatically replay
+factories. Workflow operation budgets are described in [the workflow contract](workflow.md).
+
+## Explicit runtime lock recovery
+
+After a process interruption or unresolved resource cleanup, inspect `writer.lock`
+and supply its exact `owner` to `reconcileWorkflowRuntimeLock` from this module.
+Use the same repository/project/run/compatibility options plus `expectedOwner` and
+an explicit `reconcile({ owner, directory, resources, signal })` callback. The
+resource map contains the original names/compatibility identities; the run
+directory and prepared files remain intact.
+
+The helper refuses a changed owner, unknown host, active process, changed scope
+or concurrent reconciliation. A dead same-host process is necessary for a crashed
+active lock, but its PID alone never authorizes recovery. A scope which has
+already finished its cleanup attempts marks the lock `cleanup-required` and can
+be reconciled in the same host process. Handles from that scope remain closed.
+
+The consumer must inspect/stop its observable owned resources before returning
+`{ status: "released", evidence: ["resource inspection log"] }`. The helper records
+this evidence and releases the unchanged owner lock, preserving all runtime
+records, checkpoints, worktrees and cached files. Return `{ status: "uncertain" }`
+or throw to retain the lock. Lost factory responses and failed close calls require
+this inspection; do not assert release from a missing handle alone. Recovery is
+an explicit operation, not an automatic retry policy or permission to delete
+unrelated containers/processes. Legacy locks without host/scope information need
+manual inspection; the helper refuses to manufacture ownership evidence.
 
 The runtime stores no module-global current project, credentials, resource handles
 or checkpoint. Tests run A then B in the same process, exercise linked-worktree

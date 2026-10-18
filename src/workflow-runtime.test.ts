@@ -15,6 +15,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { createCommandRunner } from "./workflow-integrations.js";
 import {
   withWorkflowRuntime,
+  reconcileWorkflowRuntimeLock,
   type WorkflowRuntime,
 } from "./workflow-runtime.js";
 
@@ -273,6 +274,86 @@ describe("repository/run-scoped workflow runtime", () => {
     await expect(
       withWorkflowRuntime(f.options, async () => {}),
     ).rejects.toMatchObject({ code: "locked" });
+  });
+  it("releases a retained runtime lock only after explicit owner and observable resource reconciliation", async () => {
+    const f = fixture();
+    let lock = "";
+    let resourceLive = true;
+    let cache = "";
+    await expect(
+      withWorkflowRuntime(f.options, async (runtime) => {
+        lock = join(dirname(runtime.directory), "writer.lock");
+        await runtime.resource("sandbox", {
+          identity: "fixture-image-v1",
+          create: async (directory) => {
+            cache = join(directory, "cache.bin");
+            writeFileSync(cache, "preserved");
+            return {};
+          },
+          close: async () => {
+            throw Error("lost container stop response");
+          },
+        });
+      }),
+    ).rejects.toMatchObject({ code: "cleanup" });
+    const owner = JSON.parse(readFileSync(lock, "utf8")).owner;
+    let observations = 0;
+    const reconcile = async (context: {
+      resources: Readonly<Record<string, string>>;
+    }) => {
+      observations++;
+      expect(context.resources).toEqual({ sandbox: "fixture-image-v1" });
+      return resourceLive
+        ? { status: "uncertain" as const }
+        : {
+            status: "released" as const,
+            evidence: ["No owned containers or subprocesses remain"],
+          };
+    };
+    await expect(
+      reconcileWorkflowRuntimeLock({
+        ...f.options,
+        expectedOwner: "wrong-owner",
+        reconcile,
+      }),
+    ).rejects.toMatchObject({ code: "locked" });
+    expect(observations).toBe(0);
+    await expect(
+      reconcileWorkflowRuntimeLock({
+        ...f.options,
+        expectedOwner: owner,
+        reconcile,
+      }),
+    ).rejects.toMatchObject({ code: "cleanup" });
+    expect(existsSync(lock)).toBe(true);
+    resourceLive = false;
+    await reconcileWorkflowRuntimeLock({
+      ...f.options,
+      expectedOwner: owner,
+      reconcile,
+    });
+    await withWorkflowRuntime(f.options, async () => {});
+    expect(readFileSync(cache, "utf8")).toBe("preserved");
+  });
+  it("refuses explicit recovery of an active owner before any callback or lock mutation", async () => {
+    const f = fixture();
+    await withWorkflowRuntime(f.options, async (runtime) => {
+      const lock = join(dirname(runtime.directory), "writer.lock");
+      const before = readFileSync(lock, "utf8");
+      let observations = 0;
+      await expect(
+        reconcileWorkflowRuntimeLock({
+          ...f.options,
+          expectedOwner: JSON.parse(before).owner,
+          reconcile: async () => {
+            observations++;
+            return { status: "released", evidence: ["must not be reached"] };
+          },
+        }),
+      ).rejects.toMatchObject({ code: "locked" });
+      expect(observations).toBe(0);
+      expect(readFileSync(lock, "utf8")).toBe(before);
+    });
   });
   it("retains the lock when a resource factory throws with an unknown outcome", async () => {
     const f = fixture();

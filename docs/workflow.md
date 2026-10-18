@@ -58,17 +58,77 @@ operation error, `gate` means failed candidate/acceptance/review/receipt checks,
 `persistence` means a failed checkpoint write, and `cancelled` reflects an aborted
 signal. Invalid project/state input and uncertain side effects are separate
 codes. There is no provider-specific error-message matching and no automatic
-retry or repair loop.
+retry or repair loop unless the explicit recovery mode below is enabled.
+
+## Durable recovery
+
+Set `recovery: {}` on a **new** `runWorkflow` invocation to enable fixed budgets:
+three total implementation attempts, and three total transport attempts for each
+operation on each implementation candidate. Once a checkpoint contains its
+`recovery` ledger, omitting this option on resume does not disable the ledger or
+reset its counters. Legacy mid-task checkpoints without counters cannot be
+upgraded by inventing unused attempts. Start a separately reviewed task/run when
+intentionally allocating a new budget; do not delete counters to force retries.
+
+Classify errors at the boundary that knows their meaning:
+
+```ts
+import { WorkflowOperationError } from "@ai-hero/sandcastle/workflow";
+
+// Your transport adapter has independently established a transient disconnect.
+throw new WorkflowOperationError("transport", "Connection interrupted", cause);
+```
+
+`transport` retries the affected operation. `substantive` requests implementation
+repair and fresh validation/review. Well-formed negative validation/review results
+also request repair. `permanent` stops, and `format` stops distinctly for a later
+bounded output-correction policy. Neither unknown failures nor error-message
+substrings are treated as transient. Unknown read failures stop persistently;
+unknown writes can be accepted only after observable completion, never blindly
+replayed. Existing root SDK provider retry behavior remains unchanged.
+
+Every attempt is charged and flushed before invocation. The ledger records the
+operation, consumed attempts, status, failure kind/message and retry deadline.
+Backoff is 500ms then 1000ms, including a persisted earliest retry time when a
+process ends after intent is flushed. `recovery.now` and `recovery.wait` are
+optional time boundaries for deterministic tests. Callbacks must honor the abort
+signal; the workflow waits abortably by default. An exhausted budget saves the
+phase and throws `WorkflowError.code === "exhausted"`; repeated ordinary resume
+does not invoke the exhausted operation again. Earlier passing implementation and
+validation remain available after review/delivery transport interruptions.
+
+Operations receive `context.attempt = { operation, implementation, transport }`
+from the persisted counters. Repair receives `context.repair = { phase, message }`.
+These are also available in checkpoints/errors for telemetry. Transport attempts
+are not extra implementation attempts. Format correction has no automatic retry
+or implementation effect in this increment.
+
+Implementation and delivery may already have performed effects after an
+interruption. Supply `recovery.reconcile(context)` to observe them. It receives
+the phase, attempt, task and available candidate/validation/review. Return:
+
+- `{ status: "completed", value }` with the actual operation result/receipt. The
+  usual candidate, acceptance and receipt gates still apply.
+- `{ status: "not-started" }` only when observation establishes that replay is
+  safe. This permits replay of a classified transport failure or crashed intent.
+- `{ status: "uncertain" }` to preserve the checkpoint and stop without replay.
+
+Reconciliation reads have their own persisted three-attempt transport budget.
+Unavailable reads cannot authorize repeating a write. An uncertain or not-started
+observation is read again on a later resume, rather than reused as timeless proof;
+the read budget remains bounded. A known completed result can be reused. A
+receipt for the wrong candidate never authorizes completion. No remote write,
+publication text, issue closure or PR creation is installed by this API.
 
 ## Scope and remaining work
 
-This first slice provides candidate-bound stage gates and explicit checkpoint
-resume. Persistent retry/repair budgets and automatic reconciliation are later
-recovery work. Evidence currently binds the candidate, not policy, dependencies,
+The workflow provides candidate-bound stage gates, explicit checkpoint resume
+and opt-in durable recovery. Evidence currently binds the candidate, not policy, dependencies,
 toolchain or changed task requirements. Do not reuse checkpoints after changing
 those inputs; the later evidence-identity slice will automate invalidation.
-Structured-output extraction/correction, queue polling, project locks, telemetry,
-diagnostics and task-selection adapters remain separate increments.
+Structured-output extraction/correction, queue polling, diagnostics and
+task-selection adapters remain separate increments. Repository/run locks and
+explicit resource reconciliation are documented in [runtime isolation](workflow-runtime.md).
 
 The tests in `src/workflow.test.ts` exercise the exported function with a minimal
 consumer and actual JSON checkpoint reloads. They cover successful delivery,

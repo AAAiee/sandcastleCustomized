@@ -129,7 +129,9 @@ policy stay with the consumer. See [the integration contract](docs/workflow-inte
 for preservation, bounded reads and explicit publication capabilities.
 
 See [the workflow contract](docs/workflow.md) for operation requirements,
-candidate/review gates, checkpoint behavior and the limits of this first slice.
+candidate/review gates and checkpoint behavior. New callers can opt into
+`recovery: {}` for persisted implementation/transport budgets and explicit
+side-effect reconciliation; unknown outcomes stop safely.
 
 Wrap effects in `withWorkflowRuntime` from `@ai-hero/sandcastle/workflow/runtime`
 for repository writer locking, project/run-scoped records and compatible resource
