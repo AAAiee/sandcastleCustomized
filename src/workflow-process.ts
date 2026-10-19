@@ -1,14 +1,11 @@
+import { atomicReplace } from "./workflow-persistence.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -121,15 +118,7 @@ function boundary<T>(action: () => Promise<T>): Promise<T> {
     });
 }
 function atomic(path: string, value: unknown) {
-  const temporary = path + "." + randomUUID() + ".tmp";
-  const fd = openSync(temporary, "wx", 0o600);
-  try {
-    writeFileSync(fd, JSON.stringify(value, null, 2) + "\n");
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
+  atomicReplace(path, JSON.stringify(value, null, 2) + "\n");
 }
 type Event = {
   type: string;

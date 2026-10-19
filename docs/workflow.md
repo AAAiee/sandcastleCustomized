@@ -193,11 +193,7 @@ retain their previous contract.
 ## Scope and remaining work
 
 The workflow provides candidate-bound stage gates, explicit checkpoint resume
-and opt-in durable recovery. Evidence currently binds the candidate, not policy, dependencies,
-toolchain or changed task requirements. Do not reuse checkpoints after changing
-those inputs; the later evidence-identity slice will automate invalidation.
-Queue polling, diagnostics and
-task-selection adapters remain separate increments. Repository/run locks and
+and opt-in durable recovery. Opt-in evidence freshness binds policy, dependencies, actual toolchain/host inputs, task scope and review context. Once saved, discovery remains required on resume; changed inputs invalidate affected validation and approval. Optional diagnostics run before full acceptance and remain required after checkpoint reload. Queue polling and task selection remain consumer adapters. Repository/run locks and
 explicit resource reconciliation are documented in [runtime isolation](workflow-runtime.md).
 
 The tests in `src/workflow.test.ts` exercise the exported function with a minimal
@@ -311,5 +307,3 @@ host files. Bind `workflowPacketPolicy`, current review prompt/context and actua
 referenced content identities into `evidence.review`; pathname-only identities
 cannot detect changed reference bytes. Volatile invocation names must not change
 review eligibility by themselves.
-
-> > > > > > > 2549177c7aa55b8803d7efd2b84fc835230e7083
