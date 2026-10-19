@@ -89,14 +89,23 @@ public static class SandcastleOwnedProcess {
       control=Task.Run(()=>Console.In.ReadLine());
       if(!control.Wait(Math.Min(timeout,30000)) || control.Result!="go") { bool stopped=Stop(job,info,assigned); Emit(new {type="done",reason="cancelled",exitCode=125,quiescent=stopped}); return; }
       Check(ResumeThread(info.Thread)!=0xffffffff); control=Task.Run(()=>Console.In.ReadLine());
+      bool primary=c.GetProperty("completion").GetString()=="primary";
       string reason="completed";
       while(Active(job)!=0) {
+        if(primary) { uint wait=WaitForSingleObject(info.Process,0); Check(wait!=0xffffffff); if(wait==0) break; }
         if(control.IsCompleted) { reason="cancelled"; break; }
         if(watch.ElapsedMilliseconds>=timeout) { reason="timeout"; break; }
         Thread.Sleep(10);
       }
-      bool quiescent=reason=="completed" ? Active(job)==0 : Stop(job,info,assigned);
-      uint code; Check(GetExitCodeProcess(info.Process,out code));
+      uint code; bool quiescent;
+      if(reason=="completed") {
+        // Preserve the primary's actual status before stopping its owned helpers.
+        Check(GetExitCodeProcess(info.Process,out code));
+        quiescent=primary ? Stop(job,info,assigned) : Active(job)==0;
+      } else {
+        quiescent=Stop(job,info,assigned);
+        Check(GetExitCodeProcess(info.Process,out code));
+      }
       Emit(new {type="done",reason,exitCode=unchecked((int)code),quiescent});
     } catch(Exception e) {
       bool quiet=false; try { quiet=Stop(job,info,assigned); } catch { }

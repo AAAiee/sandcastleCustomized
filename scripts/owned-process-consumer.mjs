@@ -89,6 +89,27 @@ try {
     console.log(
       "PASS: installed public process export stops child/grandchild before resource restoration",
     );
+    const primaryMarker = join(directory, "primary-heartbeat");
+    const primary = await runner.run({
+      executable: process.execPath,
+      args: [
+        "-e",
+        `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,[${JSON.stringify(grandchild)},${JSON.stringify(primaryMarker)}],{stdio:'ignore',detached:true}).unref();const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(primaryMarker)})){clearInterval(wait);process.exitCode=23;}},20);`,
+      ],
+      cwd: directory,
+      timeoutMs: 15000,
+      completion: "primary",
+    });
+    assert.equal(primary.exitCode, 23);
+    assert.equal(primary.quiescent, true);
+    assert.equal(JSON.parse(readFileSync(primary.record, "utf8")).exitCode, 23);
+    runner.assertQuiescent();
+    const primaryStopped = readFileSync(primaryMarker, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(readFileSync(primaryMarker, "utf8"), primaryStopped);
+    console.log(
+      "PASS: installed primary completion preserves nonzero exit and stops remaining descendants",
+    );
   }
 } finally {
   runner.assertQuiescent();

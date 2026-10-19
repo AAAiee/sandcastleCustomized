@@ -17,6 +17,7 @@ const result = await processes.run({
   args: ["--check"],
   cwd: preparedCheckout,
   timeoutMs: 60_000,
+  completion: "tree", // default: wait for every owned descendant
   signal,
 });
 processes.assertQuiescent(); // required before checkout restoration/release
@@ -41,7 +42,14 @@ resuming the child. Child stdout/stderr remain beside the JSON receipt.
 
 Cancellation, stdin EOF, or the supervisor watchdog terminates the whole job and
 checks `ActiveProcesses == 0` before reporting confirmed cleanup. The supervisor
-also waits for descendants after the primary child exits. `OwnedProcessError`
+also waits for descendants after the primary child exits under the default
+`completion: "tree"` policy. Choose `completion: "primary"` only when the primary
+command itself waits for all meaningful work: after it exits, the supervisor
+captures its actual exit code, terminates any remaining owned helpers, and
+requires `ActiveProcesses == 0` before returning that captured code with
+`quiescent: true`. This handles commands that leave an idle helper running;
+it would stop unfinished background work if the primary exited prematurely.
+Both policies retain whole-job cancellation and timeout cleanup. `OwnedProcessError`
 has `kind` (`cancelled`, `timeout`, `configuration`, `uncertain`), `quiescent`, and
 the receipt path where available. A failed observer cannot permit execution
 before ownership persistence or leave an acknowledged running job behind.
