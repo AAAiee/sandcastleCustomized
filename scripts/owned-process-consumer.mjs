@@ -48,9 +48,11 @@ try {
     });
     assert.equal(normal.exitCode, 9);
     assert.match(normal.stdout, /installed export/);
+    const completedRecord = JSON.parse(readFileSync(normal.record, "utf8"));
+    assert.equal(completedRecord.quiescent, true);
     assert.equal(
-      JSON.parse(readFileSync(normal.record, "utf8")).quiescent,
-      true,
+      completedRecord.jobName,
+      `Global\\SandcastleOwned-${completedRecord.id}`,
     );
     const marker = join(directory, "heartbeat"),
       grandchild = join(directory, "grandchild.cjs");

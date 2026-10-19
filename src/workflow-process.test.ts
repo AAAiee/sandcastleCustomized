@@ -42,6 +42,73 @@ function fixture() {
 }
 
 it.runIf(process.platform === "win32")(
+  "records an owned job in the global namespace where a session-local lookup cannot substitute for it",
+  async () => {
+    const { directory } = fixture();
+    const query = join(directory, "query-job.ps1");
+    writeFileSync(
+      query,
+      String.raw`
+param([string]$Name)
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class JobQuery {
+  [StructLayout(LayoutKind.Sequential)] struct Accounting { public long User, Kernel, PeriodUser, PeriodKernel; public uint Faults, Total, Active, Terminated; }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, out Accounting value, uint size, IntPtr returned);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static int Active(string name) {
+    var job=OpenJobObject(4,false,name);
+    if(job==IntPtr.Zero) { int error=Marshal.GetLastWin32Error(); if(error==2) return -1; throw new Win32Exception(error); }
+    try { Accounting value; if(!QueryInformationJobObject(job,1,out value,(uint)Marshal.SizeOf<Accounting>(),IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error()); return (int)value.Active; }
+    finally { CloseHandle(job); }
+  }
+}
+'@
+@{global=[JobQuery]::Active($Name);local=[JobQuery]::Active($Name.Replace('Global\','Local\'))} | ConvertTo-Json -Compress
+`,
+    );
+    let observation: unknown;
+    let name: string | undefined;
+    const runner = createOwnedProcessRunner({
+      directory,
+      windowsPowerShell,
+      save: async (record) => {
+        if (record.state === "owned") {
+          name = record.jobName;
+          observation = JSON.parse(
+            execFileSync(
+              windowsPowerShell!,
+              [
+                "-NoProfile",
+                "-File",
+                query,
+                `Global\\SandcastleOwned-${record.id}`,
+              ],
+              { encoding: "utf8", windowsHide: true },
+            ),
+          );
+        }
+      },
+    });
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "process.exitCode=7"],
+      cwd: directory,
+      timeoutMs: 15000,
+    });
+    expect(result).toMatchObject({ exitCode: 7, quiescent: true });
+    expect(observation).toEqual({ global: 1, local: -1 });
+    expect(name).toMatch(/^Global\\SandcastleOwned-/);
+    runner.assertQuiescent();
+  },
+  25000,
+);
+
+it.runIf(process.platform === "win32")(
   "captures a real command's output and nonzero exit only after owned processes stop",
   async () => {
     const { directory, runner } = fixture();
@@ -62,6 +129,136 @@ it.runIf(process.platform === "win32")(
     });
     expect(runner.isQuiescent()).toBe(true);
     expect(() => runner.assertQuiescent()).not.toThrow();
+  },
+  25000,
+);
+
+it.runIf(process.platform === "win32")(
+  "legacy unresolved jobs cannot be cleared by absence in an unproven session namespace",
+  async () => {
+    const { directory, runner } = fixture();
+    const command = {
+      executable: process.execPath,
+      args: ["-e", "process.exitCode=7"],
+      cwd: directory,
+      timeoutMs: 15000,
+    };
+    const result = await runner.run(command);
+    const legacy = JSON.parse(readFileSync(result.record, "utf8"));
+    legacy.jobName = `SandcastleOwned-${legacy.id}`;
+    legacy.quiescent = false;
+    for (const state of ["supervisor", "owned", "unknown"]) {
+      legacy.state = state;
+      const receipt = JSON.stringify(legacy);
+      writeFileSync(result.record, receipt);
+      const reloaded = createOwnedProcessRunner({
+        directory,
+        windowsPowerShell,
+      });
+      expect(await reloaded.reconcile()).toBe(false);
+      expect(reloaded.isQuiescent()).toBe(false);
+      expect(() => reloaded.assertQuiescent()).toThrow();
+      await expect(reloaded.run(command)).rejects.toMatchObject({
+        kind: "uncertain",
+        quiescent: false,
+      });
+      expect(readFileSync(result.record, "utf8")).toBe(receipt);
+    }
+  },
+  25000,
+);
+
+it.runIf(process.platform === "win32")(
+  "legacy intent without creation authorization can reconcile only after its owner is gone",
+  async () => {
+    const { directory, runner } = fixture();
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "process.exitCode=7"],
+      cwd: directory,
+      timeoutMs: 15000,
+    });
+    const legacy = JSON.parse(readFileSync(result.record, "utf8"));
+    legacy.jobName = `SandcastleOwned-${legacy.id}`;
+    const deadOwner = legacy.supervisorPid;
+    delete legacy.supervisorPid;
+    delete legacy.supervisorStart;
+    delete legacy.childPid;
+    legacy.state = "intent";
+    legacy.quiescent = false;
+    writeFileSync(result.record, JSON.stringify(legacy));
+    const reloaded = createOwnedProcessRunner({ directory, windowsPowerShell });
+    expect(await reloaded.reconcile()).toBe(false);
+    expect(reloaded.isQuiescent()).toBe(false);
+    legacy.ownerPid = deadOwner;
+    writeFileSync(result.record, JSON.stringify(legacy));
+    expect(await reloaded.reconcile()).toBe(true);
+    expect(
+      createOwnedProcessRunner({ directory, windowsPowerShell }).isQuiescent(),
+    ).toBe(true);
+  },
+  25000,
+);
+
+it.runIf(process.platform === "win32")(
+  "legacy completed receipts allow reuse but legacy namespace-only reconciliation does not",
+  async () => {
+    const { directory, runner } = fixture();
+    const command = {
+      executable: process.execPath,
+      args: ["-e", "process.exitCode=7"],
+      cwd: directory,
+      timeoutMs: 15000,
+    };
+    const result = await runner.run(command);
+    const legacy = JSON.parse(readFileSync(result.record, "utf8"));
+    legacy.jobName = `SandcastleOwned-${legacy.id}`;
+    const completedReceipt = JSON.stringify(legacy);
+    writeFileSync(result.record, completedReceipt);
+    const reloaded = createOwnedProcessRunner({ directory, windowsPowerShell });
+    expect(reloaded.isQuiescent()).toBe(true);
+    expect(await reloaded.reconcile()).toBe(true);
+    expect((await reloaded.run(command)).exitCode).toBe(7);
+    expect(readFileSync(result.record, "utf8")).toBe(completedReceipt);
+
+    legacy.state = "reconciled";
+    const reconciledReceipt = JSON.stringify(legacy);
+    writeFileSync(result.record, reconciledReceipt);
+    expect(reloaded.isQuiescent()).toBe(false);
+    expect(await reloaded.reconcile()).toBe(false);
+    expect(() => reloaded.assertQuiescent()).toThrow();
+    await expect(reloaded.run(command)).rejects.toMatchObject({
+      kind: "uncertain",
+      quiescent: false,
+    });
+    expect(readFileSync(result.record, "utf8")).toBe(reconciledReceipt);
+  },
+  25000,
+);
+
+it.runIf(process.platform === "win32")(
+  "malformed owned receipts without supervisor identity cannot become uncreated intents",
+  async () => {
+    const { directory, runner } = fixture();
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", "process.exitCode=7"],
+      cwd: directory,
+      timeoutMs: 15000,
+    });
+    const legacy = JSON.parse(readFileSync(result.record, "utf8"));
+    legacy.jobName = `SandcastleOwned-${legacy.id}`;
+    legacy.ownerPid = legacy.supervisorPid;
+    delete legacy.supervisorPid;
+    delete legacy.supervisorStart;
+    legacy.state = "owned";
+    legacy.quiescent = false;
+    const receipt = JSON.stringify(legacy);
+    writeFileSync(result.record, receipt);
+    const reloaded = createOwnedProcessRunner({ directory, windowsPowerShell });
+    expect(await reloaded.reconcile()).toBe(false);
+    expect(reloaded.isQuiescent()).toBe(false);
+    expect(readFileSync(result.record, "utf8")).toBe(receipt);
   },
   25000,
 );

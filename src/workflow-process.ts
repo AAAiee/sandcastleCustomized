@@ -53,7 +53,7 @@ export interface OwnedProcessRecord {
   /** Receipt format version. */ version: 1;
   /** Unique operation identity. */ id: string;
   /** Parent owner identity; a live owner may still authorize its supervisor. */ ownerPid: number;
-  /** Named Windows job, never reused for another operation. */ jobName: string;
+  /** Unique Windows job name; new operations explicitly use the Global namespace. */ jobName: string;
   /** Current durable lifecycle state. */ state:
     | "intent"
     | "supervisor"
@@ -166,7 +166,8 @@ export function createOwnedProcessRunner(
         if (
           value.version !== 1 ||
           !value.id ||
-          value.jobName !== `SandcastleOwned-${value.id}` ||
+          (value.jobName !== `Global\\SandcastleOwned-${value.id}` &&
+            value.jobName !== `SandcastleOwned-${value.id}`) ||
           ![
             "intent",
             "supervisor",
@@ -186,9 +187,30 @@ export function createOwnedProcessRunner(
         return { path, value };
       });
   }
+  function neverAuthorized(value: OwnedProcessRecord) {
+    return (
+      value.supervisorPid === undefined &&
+      value.supervisorStart === undefined &&
+      value.childPid === undefined &&
+      ["intent", "unknown", "reconciled"].includes(value.state)
+    );
+  }
+  function confirmedQuiet(value: OwnedProcessRecord) {
+    // Legacy reconciliation with supervisor identity may only have observed
+    // absence in the wrong session. Completed receipts instead contain the
+    // supervisor's whole-job cleanup acknowledgment. No-identity intents never
+    // received creation authorization, so their dead-owner proof remains valid.
+    return (
+      value.quiescent &&
+      (value.state === "completed" ||
+        (value.state === "reconciled" &&
+          (value.jobName === `Global\\SandcastleOwned-${value.id}` ||
+            neverAuthorized(value))))
+    );
+  }
   const quiet = () => {
     try {
-      return !active && receipts().every(({ value }) => value.quiescent);
+      return !active && receipts().every(({ value }) => confirmedQuiet(value));
     } catch {
       return false;
     }
@@ -385,7 +407,7 @@ export function createOwnedProcessRunner(
           version: 1,
           id,
           ownerPid: process.pid,
-          jobName: `SandcastleOwned-${id}`,
+          jobName: `Global\\SandcastleOwned-${id}`,
           state: "intent",
           quiescent: false,
           updated: new Date().toISOString(),
@@ -507,11 +529,12 @@ export function createOwnedProcessRunner(
         if (active) return false;
         configured();
         for (const { path, value } of receipts()) {
-          if (value.quiescent) continue;
+          if (confirmedQuiet(value)) continue;
           if (
             value.supervisorPid === undefined &&
             value.supervisorStart === undefined
           ) {
+            if (!neverAuthorized(value)) return false;
             if (!Number.isInteger(value.ownerPid) || value.ownerPid < 1)
               return false;
             try {
@@ -530,6 +553,10 @@ export function createOwnedProcessRunner(
             !Number.isInteger(value.supervisorPid) ||
             typeof value.supervisorStart !== "string"
           )
+            return false;
+          // Legacy unqualified jobs used their creator's Windows session.
+          // Absence in this observer's session cannot prove that job stopped.
+          if (value.jobName !== `Global\\SandcastleOwned-${value.id}`)
             return false;
           const config = join(directory, `${value.id}.observe.json`);
           atomic(config, {
