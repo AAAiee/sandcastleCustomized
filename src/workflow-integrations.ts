@@ -313,7 +313,7 @@ async function readWithRetry<T>(
 /** Creates a read-only GitHub GET client for an explicit repository. Invalid repository/page/retry configuration fails; collection methods reject malformed/failed responses and page overflow rather than return partial results. Only classified transient reads receive bounded retries. Labels and selection policy remain caller inputs. */
 export function createGitHubReader(
   options: {
-    /** Explicit Git checkout path; runtime scope uses its canonical common Git directory. */
+    /** Explicit GitHub owner/repository identity, such as "owner/repo", used in REST endpoints. */
     repository: string;
     /** Explicit shell-free git/gh invocation capability; must honor supplied cancellation and report actual process exit/output. */
     command: Command;
