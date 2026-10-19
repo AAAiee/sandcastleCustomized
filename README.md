@@ -103,6 +103,53 @@ You can also [create your own provider](#custom-sandbox-providers) using `create
 
 ## API
 
+### Single-task workflow (customized fork)
+
+The opt-in `@ai-hero/sandcastle/workflow` entrypoint runs one task through
+implementation, host validation, independent review and explicitly supplied
+delivery. Project identity, task selection, criteria, candidate lookup,
+persistence and delivery are consumer operations. It has no default GitHub
+writes, merge, issue closure or provider retries.
+
+```typescript
+import { runWorkflow } from "@ai-hero/sandcastle/workflow";
+
+// projectOperations is the consumer's implementation of WorkflowOperations.
+const result = await runWorkflow({
+  project: { id: "my-project", config: projectConfiguration },
+  operations: projectOperations,
+  checkpoint: savedCheckpoint, // omit on the first invocation
+});
+```
+
+Portable Git worktree preservation, read-only GitHub collections and optional
+host configuration are available separately through
+`@ai-hero/sandcastle/workflow/integrations`. Repository identity and task-selection
+policy stay with the consumer. See [the integration contract](docs/workflow-integrations.md)
+for preservation, bounded reads and explicit publication capabilities.
+
+See [the workflow contract](docs/workflow.md) for operation requirements,
+candidate/review gates and checkpoint behavior. New callers can opt into
+`recovery: {}` for persisted implementation/transport budgets and explicit
+side-effect reconciliation; unknown outcomes stop safely.
+An explicit `reviewOutput: { correct }` policy extracts task-bound independent
+reviews before spending one persisted format correction; valid rejection still
+requests code repair. See [strict review output](docs/workflow.md#strict-review-output-and-one-correction).
+
+Wrap effects in `withWorkflowRuntime` from `@ai-hero/sandcastle/workflow/runtime`
+for repository writer locking, project/run-scoped records and compatible resource
+lifecycle. [Runtime isolation](docs/workflow-runtime.md) describes identity checks,
+resource reuse and outcomes that require explicit inspection.
+
+Wrap stages and native checks with `createWorkflowMeasurements` from
+`@ai-hero/sandcastle/workflow/measurements` for persisted attempts, outcomes,
+duration and scoped token observations. [Measurement accounting](docs/workflow-measurements.md)
+explains unavailable totals, cached input and original SDK snapshot limitations.
+
+[Pinned builds and deliberate updates](docs/reproducible-build.md) describes
+offline reproduction from an exact source revision and installing the resulting
+archive without mutable npm links.
+
 Sandcastle exports a programmatic `run()` function for use in scripts, CI pipelines, or custom tooling. The examples below use `docker()`, but any `SandboxProvider` works in its place.
 
 ```typescript
