@@ -13,6 +13,7 @@ import { basename, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { createOwnedProcessRunner } from "./workflow-process.js";
+import type { OwnedProcessCommand } from "./workflow-process.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -26,8 +27,8 @@ afterEach(() => {
 const windowsPowerShell =
   process.platform === "win32"
     ? execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-Command", "(Get-Command pwsh).Source"],
+        "pwsh.exe",
+        ["-NoProfile", "-Command", "(Get-Process -Id $PID).Path"],
         { encoding: "utf8", windowsHide: true },
       ).trim()
     : undefined;
@@ -336,4 +337,61 @@ it.runIf(process.platform === "win32")(
     expect(runner.isQuiescent()).toBe(false);
   },
   12000,
+);
+
+it.runIf(process.platform === "win32")(
+  "default completion waits for descendants after the primary exits",
+  async () => {
+    const { directory, runner } = fixture();
+    const marker = join(directory, "tree-completion");
+    const grandchild = join(directory, "tree-completion-grandchild.cjs");
+    writeFileSync(
+      grandchild,
+      `const fs=require('node:fs');fs.writeFileSync(process.argv[2],'started');setTimeout(()=>fs.appendFileSync(process.argv[2],' finished'),400);`,
+    );
+    const code = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,[${JSON.stringify(grandchild)},${JSON.stringify(marker)}],{stdio:'ignore',detached:true}).unref();const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(marker)})){clearInterval(wait);process.exitCode=17;}},20);`;
+    const result = await runner.run({
+      executable: process.execPath,
+      args: ["-e", code],
+      cwd: directory,
+      timeoutMs: 5000,
+    });
+    expect(result).toMatchObject({ exitCode: 17, quiescent: true });
+    expect(readFileSync(marker, "utf8")).toBe("started finished");
+    runner.assertQuiescent();
+  },
+  15000,
+);
+
+it.runIf(process.platform === "win32")(
+  "primary completion stops lingering descendants and preserves the primary's nonzero exit",
+  async () => {
+    const { directory, runner } = fixture();
+    const marker = join(directory, "primary-completion-heartbeat");
+    const grandchild = join(directory, "primary-completion-grandchild.cjs");
+    writeFileSync(
+      grandchild,
+      `const fs=require('node:fs');fs.appendFileSync(process.argv[2],'started');setInterval(()=>fs.appendFileSync(process.argv[2],'x'),20);`,
+    );
+    const code = `const fs=require('node:fs');require('node:child_process').spawn(process.execPath,[${JSON.stringify(grandchild)},${JSON.stringify(marker)}],{stdio:'ignore',detached:true}).unref();const wait=setInterval(()=>{if(fs.existsSync(${JSON.stringify(marker)})){clearInterval(wait);console.log('primary completed');process.exitCode=23;}},20);`;
+    const command: OwnedProcessCommand = {
+      executable: process.execPath,
+      args: ["-e", code],
+      cwd: directory,
+      timeoutMs: 5000,
+      completion: "primary",
+    };
+    const result = await runner.run(command);
+    expect(result).toMatchObject({
+      exitCode: 23,
+      stdout: "primary completed\n",
+      quiescent: true,
+    });
+    expect(existsSync(marker)).toBe(true);
+    runner.assertQuiescent();
+    const stopped = readFileSync(marker, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(readFileSync(marker, "utf8")).toBe(stopped);
+  },
+  15000,
 );

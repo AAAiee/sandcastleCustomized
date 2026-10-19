@@ -44,6 +44,9 @@ export interface OwnedProcessCommand {
   /** Absolute working directory. */ readonly cwd: string;
   /** Cancellation stops and accounts for the entire owned job before rejecting. */ readonly signal?: AbortSignal;
   /** Positive, bounded watchdog deadline including startup, in milliseconds. */ readonly timeoutMs: number;
+  /** Completion waits for the whole tree by default; primary stops remaining descendants after the primary exits. */ readonly completion?:
+    | "tree"
+    | "primary";
 }
 /** Durable process receipt; no child runs until its assigned job identity is saved. */
 export interface OwnedProcessRecord {
@@ -355,13 +358,16 @@ export function createOwnedProcessRunner(
           !Number.isInteger(command.timeoutMs) ||
           command.timeoutMs < 1 ||
           command.timeoutMs > 2147400000 ||
+          (command.completion !== undefined &&
+            command.completion !== "tree" &&
+            command.completion !== "primary") ||
           command.args.some(
             (arg) => typeof arg !== "string" || arg.includes("\0"),
           )
         )
           throw new OwnedProcessError(
             "configuration",
-            "Absolute executable/cwd, literal arguments and positive bounded timeout are required.",
+            "Absolute executable/cwd, literal arguments, positive bounded timeout and tree/primary completion are required.",
             true,
           );
         if (command.signal?.aborted)
@@ -396,6 +402,7 @@ export function createOwnedProcessRunner(
             args: command.args,
             cwd: command.cwd,
             timeoutMs: command.timeoutMs,
+            completion: command.completion ?? "tree",
             stdout,
             stderr,
           });
