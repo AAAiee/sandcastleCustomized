@@ -90,6 +90,24 @@ function repositories() {
 }
 
 describe("prepared Git worktree integration", () => {
+  it("retains the candidate and preservation record while owned process quiescence is uncertain", async () => {
+    const f = repositories();
+    const before = f.snapshot(f.prepared);
+    let quiescent = true;
+    await expect(
+      withPreparedWorktree(
+        { ...f.options, quiescent: () => quiescent },
+        async () => {
+          quiescent = false;
+          throw new Error("Supervisor outcome unknown");
+        },
+      ),
+    ).rejects.toMatchObject({ kind: "restoration" });
+    expect(git(f.prepared, "rev-parse", "HEAD")).toBe(f.candidate);
+    expect(f.records.at(-1)?.phase).toBe("restoration-required");
+    expect(f.snapshot(f.source).status).toContain("owner.txt");
+    expect(f.snapshot(f.prepared)).not.toEqual(before);
+  });
   it("preserves staged, unstaged and untracked work in both checkouts and reuses ignored cache", async () => {
     const f = repositories();
     writeFileSync(join(f.prepared, "first.txt"), "staged\n");

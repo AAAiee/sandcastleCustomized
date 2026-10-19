@@ -238,6 +238,29 @@ not candidate SHA alone. Outcomes remain in current host reports and checkpoints
 a candidate commit does not need to contain its own SHA. Public validation/review
 results carry the identity under which their host operations ran.
 
+### Optional diagnostics before full acceptance
+
+Pass `diagnostics: async context => ({candidate: context.candidate, passed, evidence})`
+to `runWorkflow` for a project-owned incremental check. The workflow runs
+`implement → diagnose → validate → review → deliver`; a diagnostic pass cannot
+replace `operations.validate`. The checkpoint stores `diagnostic` independently
+and makes the diagnostic callback required on resume. With explicit recovery
+enabled, failed diagnostic evidence uses the same bounded substantive repair as failed validation. Explicit transport
+errors consume only that operation's durable transport budget. Changing validation
+inputs invalidates both checks without requesting a new implementation. A prior
+ready checkpoint newly opting into diagnostics reruns diagnostics and full
+acceptance before it can deliver again.
+
+Native commands, fixture mappings and full acceptance requirements remain in the
+consuming project. The reusable package has no Editor paths, issue map, build
+tool assumptions or automatic publication behavior.
+
+Prepared native consumers can pass `quiescent: () => boolean | Promise<boolean>`
+to `withPreparedWorktree`. A false result stops before initial checkout or before
+restoration, preserving the candidate and recovery record for reconciliation.
+Pair this with a runtime resource close assertion so unknown process ownership
+retains the runtime lock. Never restore a checkout while descendants may write it.
+
 ## Compact complete stage context
 
 `createWorkflowPacket` is a pure renderer exported from `/workflow`. It has no
@@ -288,3 +311,5 @@ host files. Bind `workflowPacketPolicy`, current review prompt/context and actua
 referenced content identities into `evidence.review`; pathname-only identities
 cannot detect changed reference bytes. Volatile invocation names must not change
 review eligibility by themselves.
+
+> > > > > > > 2549177c7aa55b8803d7efd2b84fc835230e7083
