@@ -31,9 +31,9 @@ export interface MeasurementUsage {
   /** Nonnegative provider output token count. */
   readonly outputTokens: number;
 }
-/** Normalized stage token totals; null explicitly means unavailable, never zero. */
+/** Normalized token counts. MeasurementRecord.tokens contains stage totals; observedUsage.tokens follows its accompanying scope. Null means unavailable, never zero. */
 export interface MeasurementTokens {
-  /** Fresh plus cache-creation plus cache-read input tokens; null when stage totals are unavailable. */
+  /** Fresh plus cache-creation plus cache-read input tokens; null when the corresponding counts are unavailable. */
   totalInput: number | null;
   /** Cached-read input tokens; null when unavailable. */
   cachedInput: number | null;
@@ -56,7 +56,7 @@ export interface MeasurementRecord extends MeasurementIdentity {
   model?: string;
   /** One-based attempt for this stage/check. */
   attempt: number;
-  /** Observed retry count; null or omission means unavailable, never an invented zero. */
+  /** Observed retry count; null means unavailable, never an invented zero. */
   retries: number | null;
   /** Wall-clock ISO timestamp when this measurement began. */
   started: string;
@@ -70,7 +70,7 @@ export interface MeasurementRecord extends MeasurementIdentity {
   observedUsage?: {
     /** Whether usage covers the entire stage or only the last SDK message; snapshots never become stage totals. */
     scope: MeasurementUsage["scope"];
-    /** Stage totals; unavailable measurements retain explicit null values. */
+    /** Provider counts for the accompanying scope: entire-stage totals or a last-message snapshot. */
     tokens: MeasurementTokens;
   };
   /** Reasons measurements are unavailable; missing data must not become claimed savings. */
@@ -97,7 +97,7 @@ export interface MeasurementStage {
   readonly model?: string;
   /** Optional explicit one-based attempt; defaults to the number of prior matching stage/check records plus one. */
   readonly attempt?: number;
-  /** Observed retry count; null or omission means unavailable, never an invented zero. */
+  /** Observed retry count; omission means unavailable, never an invented zero. */
   readonly retries?: number;
 }
 /** Callbacks the measured action uses to report provider usage or substantive rejection without changing workflow policy. */
