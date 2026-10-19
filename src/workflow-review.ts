@@ -1,3 +1,4 @@
+import { coversCriteria } from "./workflow-criteria.js";
 import {
   WorkflowOperationError,
   type WorkflowReview,
@@ -49,7 +50,6 @@ export function extractWorkflowReview(
     review.candidate !== context.candidate ||
     typeof review.approved !== "boolean" ||
     !Array.isArray(entries) ||
-    entries.length !== context.task.criteria.length ||
     !entries.every(
       (entry) =>
         entry &&
@@ -58,10 +58,7 @@ export function extractWorkflowReview(
         typeof entry.evidence === "string" &&
         entry.evidence.trim(),
     ) ||
-    new Set(entries.map((entry) => entry.id)).size !== entries.length ||
-    !context.task.criteria.every((criterion) =>
-      entries.some((entry) => entry.id === criterion.id),
-    )
+    !coversCriteria(context.task.criteria, entries)
   )
     invalid(
       "Review must identify this exact task/candidate and every criterion exactly once with evidence.",
