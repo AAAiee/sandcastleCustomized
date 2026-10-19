@@ -39,6 +39,11 @@ creation, creates the child suspended with atomic job membership using
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`, verifies its named non-breakaway
 KillOnJobClose job, and waits for a durable ownership acknowledgment before
 resuming the child. Child stdout/stderr remain beside the JSON receipt.
+New jobs have unique, explicitly `Global\`-qualified names. Creation and later
+observation use that exact name, so a different Windows session on the same host
+cannot mistake absence in its own session namespace for cleanup. Global creation
+failure has no session-local fallback. Access still requires the Windows job's
+permissions; inability to observe a job remains unresolved.
 
 Cancellation, stdin EOF, or the supervisor watchdog terminates the whole job and
 checks `ActiveProcesses == 0` before reporting confirmed cleanup. The supervisor
@@ -66,6 +71,18 @@ parent owner may be alive. Access failures, malformed identities, and active
 supervisors remain unresolved. PID absence alone never establishes that an
 executing process tree has stopped.
 
+Receipts from earlier versions may contain an unqualified job name. A completed
+receipt with `quiescent: true` remains usable because the supervisor confirmed
+whole-job cleanup. An unresolved legacy receipt with supervisor identity cannot
+be reconciled automatically: its original Windows session namespace was not
+recorded. A legacy `reconciled` receipt with supervisor identity is also unresolved,
+even if its saved `quiescent` field is true, because the earlier observer could
+have checked the wrong session. These receipts are preserved and block reuse;
+do not delete them or reset recovery budgets to force a rerun. An intent without
+supervisor identity never received creation authorization and retains the
+conservative parent-owner check described above. The directory and its process
+receipts belong to one host; moving them between machines supplies no cleanup proof.
+
 This is a containment boundary for cooperating build tools and their normal
 Win32 descendants. It is not a security sandbox against a malicious same-user
 process, and cannot contain tools that delegate work to an existing service,
@@ -80,6 +97,9 @@ implementation must establish equivalent ownership and termination evidence.
 Primary API basis:
 
 - [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+- [Kernel object namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+- [CreateJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw)
+- [OpenJobObjectW](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-openjobobjectw)
 - [QueryInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject)
 - [Process creation flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)
 - [Atomic job-list creation attribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)

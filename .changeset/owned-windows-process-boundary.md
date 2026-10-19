@@ -9,3 +9,6 @@ before launching a command. Existing sandbox providers are unchanged.
 Commands can explicitly complete when the primary exits, preserving its actual
 exit status while stopping remaining owned helpers and confirming whole-job
 quiescence; the default still waits for the whole tree.
+New jobs use unique Global namespace names for observation across Windows
+sessions on the same host. Unresolved legacy session-scoped receipts fail closed;
+completed receipts with confirmed cleanup remain usable.
